@@ -1,0 +1,15 @@
+# YOLO-Seg-Root-Comparative Requirements
+# PyTorch ecosystem
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Ultralytics & Core Computer Vision
+ultralytics>=8.3.0
+opencv-python>=4.8.0
+
+# Data processing & utilities
+numpy>=1.24.0
+pyyaml>=6.0
+tqdm>=4.65.0
+matplotlib>=3.7.0
+pandas>=2.0.0
