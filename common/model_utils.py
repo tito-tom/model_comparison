@@ -275,8 +275,15 @@ def prepare_batch(targets: list[dict[str, Any]], device: str | torch.device):
 
 def resolve_device(device_cfg: str) -> str:
     if str(device_cfg).lower() == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    return str(device_cfg)
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        dev = str(device_cfg)
+
+    if dev.startswith("cuda") and torch.cuda.is_available():
+        # Prevent CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH on Linux NVIDIA drivers
+        torch.backends.cudnn.benchmark = False
+
+    return dev
 
 
 def get_gpu_memory() -> str:
