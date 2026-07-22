@@ -1,0 +1,8 @@
+./data/*
+./outputs/*
+./venv/*
+*.pt
+*.pth
+__pycache__/*
+*.html
+
