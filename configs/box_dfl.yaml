@@ -1,0 +1,64 @@
+experiment_name: box_dfl
+method: box_dfl
+
+# Dataset configuration
+data_dir: D:/master_program/project_implementation/data/exp_4class_85_5_15
+
+model_yaml: configs/yolo11m-seg-root.yaml
+pretrained_weights: yolo11m-seg.pt
+resume_weights: null
+
+output_dir: outputs/box_dfl
+
+# DFL specific hyperparameters
+root_bins: 16
+root_aux_smooth_l1: 0.25
+
+nc: 4
+names:
+  0: crop_small_leaf
+  1: crop_large_leaf
+  2: weed_small_leaf
+  3: weed_large_leaf
+
+img_size: 640
+epochs: 100
+batch_size: 8
+workers: 0
+device: auto
+
+optimizer:
+  lr0: 0.0005
+  lrf: 0.001
+  weight_decay: 0.0001
+  warmup_epochs: 3
+  grad_clip: 10.0
+
+loss_gains:
+  box: 7.5
+  seg: 3.0
+  cls: 0.5
+  dfl: 1.5
+  root: 8.0
+
+augmentation:
+  enabled: true
+  fliplr: 0.5
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  brightness: 0.20
+  contrast: 0.20
+  copy_paste: 0.31
+  copy_paste_classes: [2, 3]
+  copy_paste_scale_min: 0.8
+  copy_paste_scale_max: 1.2
+  copy_paste_max_instances: 3
+
+validation:
+  interval: 1
+  conf_thres: 0.001
+  iou_thres: 0.60
+  save_period: 10
+  pck_thresholds: [0.025, 0.05, 0.10, 0.20]
+  abs_thresholds_px: [2.5, 5.0, 10.0, 20.0]

@@ -1,8 +1,24 @@
-./data/*
-./outputs/*
-./venv/*
+# Datasets & Outputs
+data/
+outputs/
+venv/
+env/
+.venv/
+
+# Weights & Models
 *.pt
 *.pth
-__pycache__/*
-*.html
+*.onnx
+*.engine
 
+# Python & Environment
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
