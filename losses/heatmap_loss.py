@@ -204,9 +204,9 @@ class HeatmapRootLoss(v8SegmentationLoss):
             pred_heatmap_sigmoid = torch.sigmoid(matched_heatmap_logits)
 
             if self.loss_type == "bce":
-                loss_hm = F.binary_cross_entropy(pred_heatmap_sigmoid, target_heatmap, reduction="none").sum(dim=(-1, -2))
+                loss_hm = F.binary_cross_entropy(pred_heatmap_sigmoid, target_heatmap, reduction="none").mean(dim=(-1, -2))
             else:
-                loss_hm = F.mse_loss(pred_heatmap_sigmoid, target_heatmap, reduction="none").sum(dim=(-1, -2))
+                loss_hm = F.mse_loss(pred_heatmap_sigmoid, target_heatmap, reduction="none").mean(dim=(-1, -2))
 
             total_loss = total_loss + loss_hm.mean()
             n += 1
