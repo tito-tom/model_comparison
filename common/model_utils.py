@@ -282,6 +282,7 @@ def resolve_device(device_cfg: str) -> str:
     if dev.startswith("cuda") and torch.cuda.is_available():
         # Prevent CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH on Linux NVIDIA drivers
         torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.enabled = False
 
     return dev
 
