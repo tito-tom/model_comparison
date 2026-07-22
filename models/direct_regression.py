@@ -78,32 +78,6 @@ class CustomSegmentHead(Segment):
         out_head = outputs[0] if isinstance(outputs, tuple) else outputs
         return ((out_head, proto), preds)
 
-    def _inference(self, x):
-        """Decode bounding boxes, masks, and regression keypoints for inference."""
-        preds = Segment._inference(self, x)
-        if "kpts" in x:
-            return torch.cat([preds, self.kpts_decode(x["kpts"])], dim=1)
-        return preds
-
-    def kpts_decode(self, kpts):
-        """
-        Decode raw regression outputs into absolute pixel coordinates.
-
-        Formula: decoded = (raw * 2 + anchor - 0.5) * stride
-        """
-        ndim = self.kpt_shape[1]
-        y = kpts.clone()
-
-        y[:, 0::ndim] = (
-            y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)
-        ) * self.strides
-
-        y[:, 1::ndim] = (
-            y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)
-        ) * self.strides
-
-        return y
-
 
 _REGISTERED = False
 
