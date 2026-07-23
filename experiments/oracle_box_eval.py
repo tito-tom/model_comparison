@@ -178,6 +178,9 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     results = {"method": method, "matched_roots": len(n_roots)}
+    if hasattr(criterion, "last_entropy"):
+        results.update(criterion.last_entropy)
+        print(f"  mean_root_entropy: {criterion.last_entropy.get('mean_root_entropy', 0.0):.4f}")
     results.update({f"normal_{k}": v for k, v in normal_pck.items()})
     results.update({f"oracle_{k}": v for k, v in oracle_pck.items()})
     results["normal_mean_npe"] = normal_err["mean_npe"]
@@ -195,10 +198,23 @@ def main():
     parser.add_argument("--config", default=str(ROOT / "configs" / "baseline.yaml"))
     parser.add_argument("--weights", default=None)
     parser.add_argument("--split", default="test", choices=["val", "test"])
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--root-bins", type=int, default=None)
+    parser.add_argument("--heatmap-size", type=int, default=None)
+    parser.add_argument("--heatmap-decode", type=str, default=None)
 
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.root_bins is not None:
+        cfg.root_bins = args.root_bins
+    if args.heatmap_size is not None:
+        cfg.heatmap_size = args.heatmap_size
+    if args.heatmap_decode is not None:
+        cfg.heatmap_decode = args.heatmap_decode
+
     ensure_output_dirs(cfg)
 
     method = getattr(cfg, "method", "direct_regression")

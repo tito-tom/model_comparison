@@ -153,7 +153,7 @@ class HeatmapRootLoss(v8SegmentationLoss):
 
         else:
             loss[1] += (proto * 0).sum() + (pred_masks * 0).sum()
-            loss[4] += (pred_kpts * 0).sum()
+            loss[4] += (pred_kpts_heatmap * 0).sum()
 
         loss[0] *= self.hyp.box
         loss[1] *= getattr(self.hyp, "seg", self.hyp.box)
@@ -172,8 +172,7 @@ class HeatmapRootLoss(v8SegmentationLoss):
         batch_idx,
         pred_kpts_heatmap,
     ):
-        total_loss = torch.zeros((), device=self.device)
-        n = 0
+        all_losses = []
 
         H = W = self.heatmap_size
 
@@ -208,7 +207,9 @@ class HeatmapRootLoss(v8SegmentationLoss):
             else:
                 loss_hm = F.mse_loss(pred_heatmap_sigmoid, target_heatmap, reduction="none").mean(dim=(-1, -2))
 
-            total_loss = total_loss + loss_hm.mean()
-            n += 1
+            all_losses.append(loss_hm)
 
-        return total_loss / max(n, 1)
+        if len(all_losses) == 0:
+            return torch.zeros((), device=self.device)
+        else:
+            return torch.cat(all_losses).mean()

@@ -49,12 +49,29 @@ def get_lr(epoch, warmup, lr0, lrf, total_epochs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "baseline.yaml"))
-    parser.add_argument("--epochs", type=int, default=None, help="Override epoch count (e.g. for smoke testing)")
+    parser.add_argument("--epochs", type=int, default=None, help="Override epoch count")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument("--copy-paste", type=float, default=None, help="Override copy_paste augmentation probability")
+    parser.add_argument("--root-bins", type=int, default=None, help="Override DFL root bins")
+    parser.add_argument("--heatmap-size", type=int, default=None, help="Override heatmap size")
+    parser.add_argument("--heatmap-decode", type=str, default=None, help="Override heatmap decode method (softargmax or argmax)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.epochs is not None:
         cfg.epochs = args.epochs
+    if args.batch_size is not None:
+        cfg.batch_size = args.                                            
+    if args.copy_paste is not None:
+        if not hasattr(cfg, "augmentation"):
+            cfg.augmentation = SimpleNamespace()
+        cfg.augmentation.copy_paste = args.copy_paste
+    if args.root_bins is not None:
+        cfg.root_bins = args.root_bins
+    if args.heatmap_size is not None:
+        cfg.heatmap_size = args.heatmap_size
+    if args.heatmap_decode is not None:
+        cfg.heatmap_decode = args.heatmap_decode
 
     ensure_output_dirs(cfg)
 

@@ -44,6 +44,11 @@ class RootDFLLoss(v8SegmentationLoss):
             self.reg_max = m.reg_max
 
         self.overlap = False
+        self.last_entropy = {
+            "mean_entropy_u": 0.0,
+            "mean_entropy_v": 0.0,
+            "mean_root_entropy": 0.0,
+        }
 
     def __call__(self, preds, batch):
         loss = torch.zeros(5, device=self.device)

@@ -270,6 +270,9 @@ def run_validation(
 
     results.update(map_eval.compute())
 
+    if hasattr(criterion, "last_entropy"):
+        results.update(criterion.last_entropy)
+
     results.update(
         pck_metrics(
             root_pred,
@@ -322,10 +325,23 @@ def main():
     parser.add_argument("--config", default=str(ROOT / "configs" / "baseline.yaml"))
     parser.add_argument("--weights", default=None)
     parser.add_argument("--split", default="val", choices=["val", "test"])
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--root-bins", type=int, default=None)
+    parser.add_argument("--heatmap-size", type=int, default=None)
+    parser.add_argument("--heatmap-decode", type=str, default=None)
 
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.root_bins is not None:
+        cfg.root_bins = args.root_bins
+    if args.heatmap_size is not None:
+        cfg.heatmap_size = args.heatmap_size
+    if args.heatmap_decode is not None:
+        cfg.heatmap_decode = args.heatmap_decode
+
     ensure_output_dirs(cfg)
 
     device = resolve_device(cfg.device)

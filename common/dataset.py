@@ -198,10 +198,15 @@ class YOLOSegRootDataset(Dataset):
         if self.augment:
             copy_paste_p = float(self.hyp.get("copy_paste", 0.0))
             if copy_paste_p > 0:
-                paste_classes = self.hyp.get("paste_classes", [2, 3])
+                paste_classes = self.hyp.get("copy_paste_classes", [2, 3])
+                scale_min = float(self.hyp.get("copy_paste_scale_min", 0.8))
+                scale_max = float(self.hyp.get("copy_paste_scale_max", 1.2))
+                max_paste = int(self.hyp.get("copy_paste_max_instances", 3))
                 cp_aug = InstanceCopyPaste(
                     p=copy_paste_p,
                     paste_classes=paste_classes,
+                    scale_range=(scale_min, scale_max),
+                    max_paste=max_paste,
                 )
                 img, labels = cp_aug(img, labels, self)
 
