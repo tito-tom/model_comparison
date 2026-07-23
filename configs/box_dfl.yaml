@@ -39,7 +39,7 @@ loss_gains:
   seg: 3.0
   cls: 0.5
   dfl: 1.5
-  root: 8.0
+  root: 1.0
 
 augmentation:
   enabled: true
