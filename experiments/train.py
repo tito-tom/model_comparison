@@ -6,6 +6,7 @@ import math
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,12 +28,7 @@ from common.model_utils import (
     resolve_device,
     save_checkpoint,
 )
-
-def get_lr(epoch, warmup, lr0, lrf, total_epochs): ...
-
-# Note: keep rest of imports intact, update line 98 below
 from experiments.validate import run_validation
-from losses.direct_loss import DirectRootLoss
 
 
 def get_lr(epoch, warmup, lr0, lrf, total_epochs):
@@ -61,7 +57,7 @@ def main():
     if args.epochs is not None:
         cfg.epochs = args.epochs
     if args.batch_size is not None:
-        cfg.batch_size = args.                                            
+        cfg.batch_size = args.batch_size
     if args.copy_paste is not None:
         if not hasattr(cfg, "augmentation"):
             cfg.augmentation = SimpleNamespace()
