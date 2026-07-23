@@ -61,7 +61,7 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
             continue
 
         imgs = imgs.to(device)
-        bs = len(batch["batch_idx"].unique())
+        bs = imgs.shape[0]
 
         with torch.no_grad():
             preds = model.model(imgs)
