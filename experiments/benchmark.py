@@ -21,7 +21,7 @@ from ultralytics.utils.tal import make_anchors
 
 from common.config import load_config
 from common.model_utils import build_loss, build_model, resolve_device
-from common.root_ops import decode_box_relative_root, decode_direct_root
+from common.root_ops import decode_box_relative_root, decode_direct_dfl_root, decode_direct_root
 
 
 def cuda_sync():
@@ -72,6 +72,12 @@ def full_pipeline(model, criterion, cfg, head, x, conf_thres: float, iou_thres: 
             pred_kpts_raw.permute(0, 2, 1).contiguous(),
             anchor_points,
             stride_tensor,
+        )
+    elif method == "direct_dfl":
+        pred_roots = decode_direct_dfl_root(
+            pred_kpts_raw.permute(0, 2, 1).contiguous(),
+            int(cfg.img_size),
+            int(cfg.img_size),
         )
     else:
         pred_roots = decode_box_relative_root(
@@ -254,6 +260,12 @@ def main():
                         pred_kpts_raw.permute(0, 2, 1).contiguous(),
                         anchor_points,
                         stride_tensor,
+                    )
+                elif method == "direct_dfl":
+                    pred_roots = decode_direct_dfl_root(
+                        pred_kpts_raw.permute(0, 2, 1).contiguous(),
+                        int(cfg.img_size),
+                        int(cfg.img_size),
                     )
                 else:
                     pred_roots = decode_box_relative_root(

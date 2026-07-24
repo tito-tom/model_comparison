@@ -27,6 +27,7 @@ from common.model_utils import build_loss, build_model, prepare_batch, resolve_d
 from common.root_ops import (
     absolute_pck_metrics,
     decode_box_relative_root,
+    decode_direct_dfl_root,
     decode_direct_root,
     keypoints_to_pixels,
     pck_metrics,
@@ -125,11 +126,18 @@ def run_validation(
 
             pred_bboxes_s = pred_bboxes * stride_tensor
 
-            if getattr(cfg, "method", "direct_regression") == "direct_regression":
+            method = getattr(cfg, "method", "direct_regression")
+            if method == "direct_regression":
                 pred_roots = decode_direct_root(
                     pred_kpts_raw.permute(0, 2, 1).contiguous(),
                     anchor_points,
                     stride_tensor,
+                )
+            elif method == "direct_dfl":
+                pred_roots = decode_direct_dfl_root(
+                    pred_kpts_raw.permute(0, 2, 1).contiguous(),
+                    int(cfg.img_size),
+                    int(cfg.img_size),
                 )
             else:
                 pred_roots = decode_box_relative_root(

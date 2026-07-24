@@ -38,8 +38,8 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
     model.model.eval()
     method = getattr(cfg, "method", "direct_regression")
 
-    if method == "direct_regression":
-        print("[oracle] Baseline direct regression is box-independent; oracle-box PCK equals normal PCK.")
+    if method in ("direct_regression", "direct_dfl"):
+        print(f"[oracle] Method '{method}' is box-independent; oracle-box PCK equals normal PCK. Skipping oracle decoding.")
         return
 
     head = model.model
@@ -218,8 +218,8 @@ def main():
     ensure_output_dirs(cfg)
 
     method = getattr(cfg, "method", "direct_regression")
-    if method == "direct_regression":
-        print("[oracle] Baseline direct regression is box-independent; oracle-box PCK equals normal PCK.")
+    if method in ("direct_regression", "direct_dfl"):
+        print(f"[oracle] Method '{method}' is box-independent; oracle-box PCK equals normal PCK. Skipping oracle decoding.")
         validate_main()
         return
 

@@ -12,11 +12,13 @@ from ultralytics.utils import DEFAULT_CFG
 from models.direct_regression import CustomSegmentHead, register_custom_head
 from models.box_offset import CustomBoxOffsetHead, register_box_offset_head
 from models.box_dfl import CustomBoxDFLHead, register_box_dfl_head
+from models.direct_dfl import CustomDirectDFLHead, register_direct_dfl_head
 from models.roi_heatmap import CustomROIHeatmapHead, register_roi_heatmap_head
 
 from losses.direct_loss import DirectRootLoss
 from losses.box_offset_loss import BoxOffsetRootLoss
 from losses.root_dfl_loss import RootDFLLoss
+from losses.direct_dfl_loss import DirectDFLRootLoss
 from losses.heatmap_loss import HeatmapRootLoss
 
 
@@ -46,6 +48,7 @@ def register_model_head(cfg):
     tasks.CustomSegmentHead = CustomSegmentHead
     tasks.CustomBoxOffsetHead = CustomBoxOffsetHead
     tasks.CustomBoxDFLHead = CustomBoxDFLHead
+    tasks.CustomDirectDFLHead = CustomDirectDFLHead
     tasks.CustomROIHeatmapHead = CustomROIHeatmapHead
 
     original_parse_model = getattr(tasks, "_original_parse_model", tasks.parse_model)
@@ -59,6 +62,7 @@ def register_model_head(cfg):
             "CustomSegmentHead",
             "CustomBoxOffsetHead",
             "CustomBoxDFLHead",
+            "CustomDirectDFLHead",
             "CustomROIHeatmapHead",
         }
 
@@ -95,6 +99,14 @@ def register_model_head(cfg):
                 )
             elif method == "box_dfl":
                 custom = CustomBoxDFLHead(
+                    nc=seg.nc,
+                    nm=seg.nm,
+                    npr=seg.npr,
+                    ch=tuple(ch_list),
+                    root_bins=getattr(cfg, "root_bins", 16),
+                )
+            elif method == "direct_dfl":
+                custom = CustomDirectDFLHead(
                     nc=seg.nc,
                     nm=seg.nm,
                     npr=seg.npr,
@@ -202,6 +214,12 @@ def build_loss(model, cfg):
         return BoxOffsetRootLoss(inner_model)
     elif method == "box_dfl":
         return RootDFLLoss(
+            inner_model,
+            root_bins=getattr(cfg, "root_bins", 16),
+            lambda_aux=getattr(cfg, "root_aux_smooth_l1", 0.25),
+        )
+    elif method == "direct_dfl":
+        return DirectDFLRootLoss(
             inner_model,
             root_bins=getattr(cfg, "root_bins", 16),
             lambda_aux=getattr(cfg, "root_aux_smooth_l1", 0.25),

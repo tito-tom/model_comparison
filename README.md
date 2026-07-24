@@ -2,12 +2,13 @@
 
 A research framework based on **YOLO11m-seg** for plant instance detection, segmentation, and root-point localization in smart autonomous agriculture.
 
-This repository implements and compares **4 root localization strategies** under strict experimental fairness:
+This repository implements and compares **5 root localization strategies** under strict experimental fairness:
 
 1. **Direct Regression (`direct_regression`)** *(Thesis Baseline)*: Direct root coordinate prediction in feature-map stride space.
-2. **Box-Relative Offset Regression (`box_offset`)**: Scale-invariant sigmoid offset regression relative to bounding box boundaries.
-3. **Box-Relative Distribution Focal Loss Regression (`box_dfl`)**: Discrete binned distribution prediction with expected value decoding and entropy uncertainty estimation.
-4. **ROI / Instance Heatmap Localization (`heatmap`)**: 2D spatial Gaussian heatmap prediction with continuous 2D soft-argmax integral regression decoding.
+2. **Direct Image-Space Distribution Focal Loss (`direct_dfl`)**: Full-image normalized coordinate prediction via discrete binned distribution prediction and expectation decoding (box-independent).
+3. **Box-Relative Offset Regression (`box_offset`)**: Scale-invariant sigmoid offset regression relative to bounding box boundaries.
+4. **Box-Relative Distribution Focal Loss Regression (`box_dfl`)**: Discrete binned distribution prediction relative to bounding box boundaries with expected value decoding and entropy uncertainty estimation.
+5. **ROI / Instance Heatmap Localization (`heatmap`)**: 2D spatial Gaussian heatmap prediction with continuous 2D soft-argmax integral regression decoding.
 
 ---
 
@@ -42,16 +43,19 @@ YOLO-Seg-Root-Comparative/
 │   └── visualization.py      # Render bounding boxes, masks, and root points
 ├── models/
 │   ├── direct_regression.py  # CustomSegmentHead (baseline direct regression)
+│   ├── direct_dfl.py         # CustomDirectDFLHead (full-image normalized DFL)
 │   ├── box_offset.py         # CustomBoxOffsetHead (sigmoid box-relative offset)
-│   ├── box_dfl.py            # CustomBoxDFLHead (binned DFL + expectation)
+│   ├── box_dfl.py            # CustomBoxDFLHead (binned box-relative DFL + expectation)
 │   └── roi_heatmap.py        # CustomROIHeatmapHead (2D spatial heatmap)
 ├── losses/
 │   ├── direct_loss.py        # Multi-task loss with direct pixel Smooth-L1 root loss
+│   ├── direct_dfl_loss.py    # Multi-task loss with full-image normalized DFL & entropy
 │   ├── box_offset_loss.py   # Multi-task loss with normalized relative Smooth-L1
 │   ├── root_dfl_loss.py      # Multi-task loss with dual-bin DFL & entropy
 │   └── heatmap_loss.py       # Multi-task loss with 2D Gaussian MSE heatmap loss
 ├── configs/
 │   ├── baseline.yaml         # Direct regression configuration
+│   ├── direct_dfl.yaml       # Direct DFL configuration
 │   ├── box_offset.yaml       # Box-offset configuration
 │   ├── box_dfl.yaml          # Box-DFL configuration
 │   ├── heatmap.yaml          # ROI heatmap configuration
@@ -65,6 +69,7 @@ YOLO-Seg-Root-Comparative/
 │   └── aggregate_results.py  # Results summary aggregator
 ├── outputs/
 │   ├── baseline/             # Baseline outputs, checkpoints, and logs
+│   ├── direct_dfl/           # Direct DFL outputs, checkpoints, and logs
 │   ├── box_offset/           # Box-offset outputs, checkpoints, and logs
 │   ├── box_dfl/              # Box-DFL outputs, checkpoints, and logs
 │   └── heatmap/              # Heatmap outputs, checkpoints, and logs
@@ -99,13 +104,16 @@ pip install ultralytics torch torchvision opencv-python pyyaml tqdm numpy
 
 ### 2. Verify Mathematical Operations
 ```bash
-python test/test_root_ops.py
+python tests/test_root_ops.py
 ```
 
 ### 3. 1-Epoch Smoke Test (Quick Verification)
 ```bash
 # Baseline Direct Regression
 python experiments/train.py --config configs/baseline.yaml --epochs 1
+
+# Direct Image-Space DFL Regression
+python experiments/train.py --config configs/direct_dfl.yaml --epochs 1
 
 # Box-Relative Offset Regression
 python experiments/train.py --config configs/box_offset.yaml --epochs 1
@@ -120,6 +128,7 @@ python experiments/train.py --config configs/heatmap.yaml --epochs 1
 ### 4. Full Training (100 Epochs)
 ```bash
 python experiments/train.py --config configs/baseline.yaml
+python experiments/train.py --config configs/direct_dfl.yaml
 python experiments/train.py --config configs/box_offset.yaml
 python experiments/train.py --config configs/box_dfl.yaml
 python experiments/train.py --config configs/heatmap.yaml
@@ -128,6 +137,7 @@ python experiments/train.py --config configs/heatmap.yaml
 ### 5. Evaluate Test Set & Validation Metrics
 ```bash
 python experiments/validate.py --config configs/baseline.yaml --weights outputs/baseline/checkpoints/best.pt --split test
+python experiments/validate.py --config configs/direct_dfl.yaml --weights outputs/direct_dfl/checkpoints/best.pt --split test
 python experiments/validate.py --config configs/box_offset.yaml --weights outputs/box_offset/checkpoints/best.pt --split test
 python experiments/validate.py --config configs/box_dfl.yaml --weights outputs/box_dfl/checkpoints/best.pt --split test
 python experiments/validate.py --config configs/heatmap.yaml --weights outputs/heatmap/checkpoints/best.pt --split test
@@ -143,6 +153,7 @@ python experiments/oracle_box_eval.py --config configs/heatmap.yaml --weights ou
 ### 7. Run Visual Predictions on Images
 ```bash
 python experiments/predict.py --config configs/baseline.yaml --weights outputs/baseline/checkpoints/best.pt
+python experiments/predict.py --config configs/direct_dfl.yaml --weights outputs/direct_dfl/checkpoints/best.pt
 python experiments/predict.py --config configs/box_offset.yaml --weights outputs/box_offset/checkpoints/best.pt
 python experiments/predict.py --config configs/box_dfl.yaml --weights outputs/box_dfl/checkpoints/best.pt
 python experiments/predict.py --config configs/heatmap.yaml --weights outputs/heatmap/checkpoints/best.pt
@@ -151,6 +162,7 @@ python experiments/predict.py --config configs/heatmap.yaml --weights outputs/he
 ### 8. Latency & FPS Benchmarking
 ```bash
 python experiments/benchmark.py --config configs/baseline.yaml
+python experiments/benchmark.py --config configs/direct_dfl.yaml
 python experiments/benchmark.py --config configs/box_offset.yaml
 python experiments/benchmark.py --config configs/box_dfl.yaml
 python experiments/benchmark.py --config configs/heatmap.yaml
@@ -168,6 +180,7 @@ python experiments/aggregate_results.py --root outputs --out outputs/summary.csv
 | Method | Head Channels / Anchor | Root Target Space | Decoding Method | Box Independent? |
 | :--- | :---: | :---: | :---: | :---: |
 | **Direct Regression** | 2 | Stride Pixel Space | $(2 \cdot z + \text{anc} - 0.5) \cdot \text{stride}$ | ✅ Yes |
+| **Direct DFL** | $2 \times B$ | Full-Image Normalized $[0, 1]$ | Expected Value $\sum P_k \frac{k}{B-1} \cdot \text{img\_size}$ | ✅ Yes |
 | **Box Offset** | 2 | Box Relative $[0, 1]$ | $x_1 + \sigma(z_u) \cdot w$ | ❌ No |
 | **Box DFL** | $2 \times B$ | Discrete Binned $[0, 1]$ | Expected Value $\sum P_k \frac{k}{B-1}$ | ❌ No |
 | **ROI Heatmap** | $H \times W$ | 2D Spatial Grid | 2D Soft-Argmax Integral | ❌ No |
@@ -177,5 +190,3 @@ python experiments/aggregate_results.py --root outputs --out outputs/summary.csv
 ## 📜 Citation & License
 
 This codebase is part of the **YOLO-Seg-Root** international conference extension research project.
-#   m o d e l _ c o m p a r i s o n  
- 

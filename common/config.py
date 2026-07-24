@@ -40,10 +40,14 @@ def load_config(path: str | os.PathLike) -> SimpleNamespace:
     raw["output_dir"] = resolve_path(raw.get("output_dir", "outputs/baseline"))
     raw["resume_weights"] = resolve_path(raw.get("resume_weights"))
 
-    data_dir = raw.get("data_dir", "data/dummy")
-    if not os.path.exists(data_dir) and os.path.exists("data/dummy"):
-        print(f"[config] Config data_dir '{data_dir}' not found; using local fallback 'data/dummy'")
-        data_dir = "data/dummy"
+    data_dir = raw.get("data_dir", "data/exp_4class")
+    if not os.path.exists(os.path.join(data_dir, "images", "train")):
+        if os.path.exists("data/exp_4class"):
+            print(f"[config] Config data_dir '{data_dir}' not found or incomplete; using local fallback 'data/exp_4class'")
+            data_dir = "data/exp_4class"
+        elif os.path.exists("data/dummy"):
+            print(f"[config] Config data_dir '{data_dir}' not found or incomplete; using local fallback 'data/dummy'")
+            data_dir = "data/dummy"
 
     raw["train_images"] = os.path.join(data_dir, "images", "train")
     raw["train_labels"] = os.path.join(data_dir, "labels", "train")

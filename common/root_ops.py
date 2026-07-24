@@ -96,6 +96,65 @@ def decode_box_relative_root(
     return torch.stack([rx_hat, ry_hat], dim=-1)
 
 
+def encode_image_normalized_root(
+    root_points_pixel: torch.Tensor,
+    image_width: float | int | torch.Tensor,
+    image_height: float | int | torch.Tensor,
+) -> torch.Tensor:
+    """
+    Convert absolute pixel root coordinates to normalized image coordinates (tx, ty) in [0, 1].
+
+    Formula:
+        tx = root_x / image_width
+        ty = root_y / image_height
+
+    Args:
+        root_points_pixel: Ground-truth root points in pixels, shape (..., 2).
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+
+    Returns:
+        Normalized image coordinates (tx, ty), shape (..., 2), clamped to [0, 1].
+    """
+    if root_points_pixel.numel() == 0:
+        return torch.zeros((0, 2), device=root_points_pixel.device, dtype=root_points_pixel.dtype)
+
+    tx = root_points_pixel[..., 0] / image_width
+    ty = root_points_pixel[..., 1] / image_height
+
+    return torch.stack([tx, ty], dim=-1).clamp(0.0, 1.0)
+
+
+def decode_direct_dfl_root(
+    xy_normalized: torch.Tensor,
+    image_width: float | int | torch.Tensor,
+    image_height: float | int | torch.Tensor,
+) -> torch.Tensor:
+    """
+    Decode normalized image coordinates (tx_hat, ty_hat) in [0, 1] back to absolute pixel coordinates.
+
+    Formula:
+        root_x_hat = tx_hat * image_width
+        root_y_hat = ty_hat * image_height
+
+    Args:
+        xy_normalized: Normalized image coordinates, shape (..., 2).
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+
+    Returns:
+        Decoded root keypoints in pixel space, shape (..., 2).
+    """
+    if xy_normalized.numel() == 0:
+        return torch.zeros((0, 2), device=xy_normalized.device, dtype=xy_normalized.dtype)
+
+    root_x_hat = xy_normalized[..., 0] * image_width
+    root_y_hat = xy_normalized[..., 1] * image_height
+
+    return torch.stack([root_x_hat, root_y_hat], dim=-1)
+
+
+
 def encode_dfl_target(
     t: torch.Tensor,
     num_bins: int,
