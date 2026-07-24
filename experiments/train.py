@@ -28,6 +28,7 @@ from common.model_utils import (
     resolve_device,
     save_checkpoint,
 )
+from common.reproducibility import get_generator, seed_worker, set_seed
 from experiments.validate import run_validation
 
 
@@ -51,6 +52,7 @@ def main():
     parser.add_argument("--root-bins", type=int, default=None, help="Override DFL root bins")
     parser.add_argument("--heatmap-size", type=int, default=None, help="Override heatmap size")
     parser.add_argument("--heatmap-decode", type=str, default=None, help="Override heatmap decode method (softargmax or argmax)")
+    parser.add_argument("--seed", type=int, default=None, help="Override random seed")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -68,13 +70,21 @@ def main():
         cfg.heatmap_size = args.heatmap_size
     if args.heatmap_decode is not None:
         cfg.heatmap_decode = args.heatmap_decode
+    if args.seed is not None:
+        cfg.seed = args.seed
 
     ensure_output_dirs(cfg)
 
     device = resolve_device(cfg.device)
 
+    # Set seed before creating model, dataset, dataloaders, and optimizer
+    seed = int(getattr(cfg, "seed", 42))
+    deterministic = bool(getattr(cfg, "deterministic", True))
+    set_seed(seed, deterministic=deterministic)
+
     print(f"[train] Device: {device}")
     print(f"[train] Experiment: {cfg.experiment_name}")
+    print(f"[train] Seed: {seed} (deterministic={deterministic})")
 
     train_ds = YOLOSegRootDataset(
         cfg.train_images,
@@ -91,6 +101,8 @@ def main():
         augment=False,
     )
 
+    g = get_generator(seed)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=int(cfg.batch_size),
@@ -98,6 +110,8 @@ def main():
         num_workers=int(cfg.workers),
         pin_memory=torch.cuda.is_available(),
         collate_fn=YOLOSegRootDataset.collate_fn,
+        worker_init_fn=seed_worker,
+        generator=g,
     )
 
     val_loader = DataLoader(
@@ -107,6 +121,8 @@ def main():
         num_workers=int(cfg.workers),
         pin_memory=torch.cuda.is_available(),
         collate_fn=YOLOSegRootDataset.collate_fn,
+        worker_init_fn=seed_worker,
+        generator=g,
     )
 
     model = build_model(cfg, device)

@@ -8,6 +8,9 @@ model_yaml: configs/yolo11m-seg-root.yaml
 pretrained_weights: yolo11m-seg.pt
 resume_weights: null
 
+seed: 42
+deterministic: true
+
 output_dir: outputs/direct_dfl
 
 # DFL specific hyperparameters

@@ -62,6 +62,9 @@ def load_config(path: str | os.PathLike) -> SimpleNamespace:
     elif isinstance(names, list):
         raw["names"] = {i: str(v) for i, v in enumerate(names)}
 
+    raw["seed"] = int(raw.get("seed", 42))
+    raw["deterministic"] = bool(raw.get("deterministic", True))
+
     return _to_namespace(raw)
 
 
