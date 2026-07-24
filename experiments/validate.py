@@ -139,11 +139,20 @@ def run_validation(
                     int(cfg.img_size),
                     int(cfg.img_size),
                 )
+            elif method == "instance_conditioned_heatmap":
+                # Placeholder zeros for NMS; actual roots decoded after NMS
+                pred_roots = torch.zeros_like(
+                    pred_kpts_raw.permute(0, 2, 1).contiguous()
+                )
             else:
                 pred_roots = decode_box_relative_root(
                     pred_kpts_raw.permute(0, 2, 1).contiguous(),
                     pred_bboxes_s,
                 )
+
+            # Get instance heatmap module for post-NMS decoding
+            ih_module = getattr(head, "instance_heatmap", None)
+            instance_feats = preds.get("instance_feats") if method == "instance_conditioned_heatmap" else None
 
             nms_input = torch.cat(
                 [
@@ -195,6 +204,24 @@ def run_validation(
                 p_cls = det[:, 5].long()
                 p_mask_coeff = det[:, 6 : 6 + head.nm]
                 p_roots = det[:, 6 + head.nm : 6 + head.nm + 2]
+
+                # Instance-Conditioned Heatmap: decode roots from post-NMS boxes
+                if method == "instance_conditioned_heatmap" and ih_module is not None and instance_feats is not None:
+                    ih_cfg = getattr(cfg, "instance_heatmap", None)
+                    decode_method = str(getattr(ih_cfg, "decode_method", "softargmax")) if ih_cfg else "softargmax"
+                    batch_idx_det = torch.full(
+                        (len(p_boxes),), bi, dtype=torch.long, device=device
+                    )
+                    hm_out = ih_module(
+                        feats=instance_feats,
+                        boxes=p_boxes,
+                        batch_indices=batch_idx_det,
+                    )
+                    p_roots = ih_module.decode_roots(
+                        hm_out["heatmap_logits"],
+                        p_boxes,
+                        decode_method=decode_method,
+                    )
 
                 try:
                     p_masks = process_mask(

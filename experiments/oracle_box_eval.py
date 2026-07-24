@@ -78,21 +78,44 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
             pred_bboxes = criterion.bbox_decode(anchor_points, pred_distri)
             pred_bboxes_s = pred_bboxes * stride_tensor
 
-            pred_roots_normal = decode_box_relative_root(
-                pred_kpts_raw.permute(0, 2, 1).contiguous(),
-                pred_bboxes_s,
-            )
+            # Get instance heatmap module
+            ih_module = getattr(head, "instance_heatmap", None)
+            instance_feats = preds.get("instance_feats") if method == "instance_conditioned_heatmap" else None
+            ih_cfg = getattr(cfg, "instance_heatmap", None)
+            ih_decode_method = str(getattr(ih_cfg, "decode_method", "softargmax")) if ih_cfg else "softargmax"
 
-            nms_input = torch.cat(
-                [
-                    xyxy2xywh(pred_bboxes_s).permute(0, 2, 1),
-                    pred_scores.sigmoid(),
-                    pred_masks_raw,
-                    pred_roots_normal.permute(0, 2, 1),
-                    pred_kpts_raw,  # Pass raw relative (u, v)
-                ],
-                dim=1,
-            )
+            if method == "instance_conditioned_heatmap" and ih_module is not None and instance_feats is not None:
+                # For instance_conditioned_heatmap, decode using predicted boxes
+                pred_roots_normal = torch.zeros_like(
+                    pred_kpts_raw.permute(0, 2, 1).contiguous()
+                )
+            else:
+                pred_roots_normal = decode_box_relative_root(
+                    pred_kpts_raw.permute(0, 2, 1).contiguous(),
+                    pred_bboxes_s,
+                )
+
+            if method == "instance_conditioned_heatmap":
+                nms_input = torch.cat(
+                    [
+                        xyxy2xywh(pred_bboxes_s).permute(0, 2, 1),
+                        pred_scores.sigmoid(),
+                        pred_masks_raw,
+                        pred_roots_normal.permute(0, 2, 1),
+                    ],
+                    dim=1,
+                )
+            else:
+                nms_input = torch.cat(
+                    [
+                        xyxy2xywh(pred_bboxes_s).permute(0, 2, 1),
+                        pred_scores.sigmoid(),
+                        pred_masks_raw,
+                        pred_roots_normal.permute(0, 2, 1),
+                        pred_kpts_raw,  # Pass raw relative (u, v)
+                    ],
+                    dim=1,
+                )
 
             detections = non_max_suppression(
                 nms_input,
@@ -114,12 +137,28 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
                 p_scores = det[:, 4]
                 p_cls = det[:, 5].long()
 
-                # Extract normalized relative (u, v) from detection tensor
-                # Layout: 4 (box) + 1 (conf) + 1 (cls) + nm (mask_coeff) + 2 (normal_roots) + 2 (raw_uv)
-                raw_uv_idx = 6 + head.nm + 2
-                p_raw_uv = det[:, raw_uv_idx : raw_uv_idx + 2]
-
-                p_normal_roots = det[:, 6 + head.nm : 6 + head.nm + 2]
+                if method == "instance_conditioned_heatmap" and ih_module is not None and instance_feats is not None:
+                    # Decode normal roots using predicted boxes
+                    batch_idx_det = torch.full(
+                        (len(p_boxes),), bi, dtype=torch.long, device=device
+                    )
+                    hm_out = ih_module(
+                        feats=instance_feats,
+                        boxes=p_boxes,
+                        batch_indices=batch_idx_det,
+                    )
+                    p_normal_roots = ih_module.decode_roots(
+                        hm_out["heatmap_logits"],
+                        p_boxes,
+                        decode_method=ih_decode_method,
+                    )
+                    p_raw_uv = None  # Not used for this method
+                else:
+                    # Extract normalized relative (u, v) from detection tensor
+                    # Layout: 4 (box) + 1 (conf) + 1 (cls) + nm (mask_coeff) + 2 (normal_roots) + 2 (raw_uv)
+                    raw_uv_idx = 6 + head.nm + 2
+                    p_raw_uv = det[:, raw_uv_idx : raw_uv_idx + 2]
+                    p_normal_roots = det[:, 6 + head.nm : 6 + head.nm + 2]
 
                 matches = greedy_match_by_iou_and_class(
                     p_boxes, p_cls, gt_boxes, gt_cls, iou_thres=0.50
@@ -128,10 +167,24 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
                 for pi, gi, _ in matches:
                     normal_pred_roots.append(p_normal_roots[pi].detach())
 
-                    # Oracle decoding using ground-truth bounding box
-                    oracle_root = decode_box_relative_root(
-                        p_raw_uv[pi : pi + 1], gt_boxes[gi : gi + 1]
-                    ).squeeze(0)
+                    if method == "instance_conditioned_heatmap" and ih_module is not None:
+                        # Oracle: decode heatmap using GT box
+                        oracle_batch_idx = torch.zeros(1, dtype=torch.long, device=device)
+                        oracle_hm_out = ih_module(
+                            feats=instance_feats,
+                            boxes=gt_boxes[gi:gi+1],
+                            batch_indices=oracle_batch_idx,
+                        )
+                        oracle_root = ih_module.decode_roots(
+                            oracle_hm_out["heatmap_logits"],
+                            gt_boxes[gi:gi+1],
+                            decode_method=ih_decode_method,
+                        ).squeeze(0)
+                    else:
+                        # Box-relative methods: decode using GT box
+                        oracle_root = decode_box_relative_root(
+                            p_raw_uv[pi : pi + 1], gt_boxes[gi : gi + 1]
+                        ).squeeze(0)
 
                     oracle_pred_roots.append(oracle_root.detach())
                     all_gt_roots.append(gt_roots[gi].detach())

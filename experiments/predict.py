@@ -68,10 +68,12 @@ def main():
     source = args.source or cfg.test_images
 
     image_files = []
-    for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
-        image_files.extend(glob.glob(os.path.join(source, ext)))
-
-    image_files = sorted(image_files)
+    if os.path.isfile(source):
+        image_files = [source]
+    elif os.path.isdir(source):
+        for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
+            image_files.extend(glob.glob(os.path.join(source, ext)))
+        image_files = sorted(image_files)
     method = getattr(cfg, "method", "direct_regression")
 
     for path in image_files:
@@ -91,7 +93,6 @@ def main():
             proto_raw = preds["proto"]
             pred_kpts_raw = preds["kpts"]
 
-            bs = 1
             anchor_points, stride_tensor = make_anchors(feats, head.stride, 0.5)
 
             pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
@@ -116,11 +117,20 @@ def main():
                     int(cfg.img_size),
                     int(cfg.img_size),
                 )
+            elif method == "instance_conditioned_heatmap":
+                # Placeholder: actual roots decoded post-NMS
+                pred_roots = torch.zeros_like(
+                    pred_kpts_raw.permute(0, 2, 1).contiguous()
+                )
             else:
                 pred_roots = decode_box_relative_root(
                     pred_kpts_raw.permute(0, 2, 1).contiguous(),
                     pred_bboxes_s,
                 )
+
+            # Get instance heatmap module for post-NMS decode
+            ih_module = getattr(head, "instance_heatmap", None)
+            instance_feats = preds.get("instance_feats") if method == "instance_conditioned_heatmap" else None
 
             nms_input = torch.cat(
                 [
@@ -155,6 +165,26 @@ def main():
                     .cpu()
                     .numpy()
                 )
+
+                # Instance-Conditioned Heatmap: decode roots from post-NMS boxes
+                if method == "instance_conditioned_heatmap" and ih_module is not None and instance_feats is not None:
+                    ih_cfg = getattr(cfg, "instance_heatmap", None)
+                    decode_method = str(getattr(ih_cfg, "decode_method", "softargmax")) if ih_cfg else "softargmax"
+                    det_boxes = det[:, :4]
+                    batch_idx_det = torch.zeros(
+                        len(det_boxes), dtype=torch.long, device=device
+                    )
+                    hm_out = ih_module(
+                        feats=instance_feats,
+                        boxes=det_boxes,
+                        batch_indices=batch_idx_det,
+                    )
+                    decoded_roots = ih_module.decode_roots(
+                        hm_out["heatmap_logits"],
+                        det_boxes,
+                        decode_method=decode_method,
+                    )
+                    roots = decoded_roots.detach().cpu().numpy()
 
                 try:
                     masks = process_mask(

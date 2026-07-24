@@ -79,6 +79,10 @@ def full_pipeline(model, criterion, cfg, head, x, conf_thres: float, iou_thres: 
             int(cfg.img_size),
             int(cfg.img_size),
         )
+    elif method == "instance_conditioned_heatmap":
+        pred_roots = torch.zeros_like(
+            pred_kpts_raw.permute(0, 2, 1).contiguous()
+        )
     else:
         pred_roots = decode_box_relative_root(
             pred_kpts_raw.permute(0, 2, 1).contiguous(),
@@ -121,6 +125,33 @@ def full_pipeline(model, criterion, cfg, head, x, conf_thres: float, iou_thres: 
                 )
             except Exception:
                 pass
+
+    # Instance-Conditioned Heatmap: decode roots from post-NMS boxes
+    ih_module = getattr(head, "instance_heatmap", None)
+    if method == "instance_conditioned_heatmap" and ih_module is not None:
+        instance_feats = preds.get("instance_feats")
+        if instance_feats is not None:
+            ih_cfg = getattr(cfg, "instance_heatmap", None)
+            decode_method = str(getattr(ih_cfg, "decode_method", "softargmax")) if ih_cfg else "softargmax"
+            for bi, det in enumerate(detections):
+                if det is None or len(det) == 0:
+                    continue
+                p_boxes = det[:, :4]
+                batch_idx_det = torch.full(
+                    (len(p_boxes),), bi, dtype=torch.long, device=p_boxes.device
+                )
+                hm_out = ih_module(
+                    feats=instance_feats,
+                    boxes=p_boxes,
+                    batch_indices=batch_idx_det,
+                )
+                decoded_roots = ih_module.decode_roots(
+                    hm_out["heatmap_logits"],
+                    p_boxes,
+                    decode_method=decode_method,
+                )
+                # Overwrite the placeholder roots in detection tensor
+                det[:, 6 + head.nm : 6 + head.nm + 2] = decoded_roots
 
     return detections
 
@@ -267,6 +298,10 @@ def main():
                         int(cfg.img_size),
                         int(cfg.img_size),
                     )
+                elif method == "instance_conditioned_heatmap":
+                    pred_roots = torch.zeros_like(
+                        pred_kpts_raw.permute(0, 2, 1).contiguous()
+                    )
                 else:
                     pred_roots = decode_box_relative_root(
                         pred_kpts_raw.permute(0, 2, 1).contiguous(),
@@ -360,6 +395,14 @@ def main():
     print(f"Full-pipeline FPS           : {fps_pipeline:.2f}")
     print(f"Total FPS with image loading: {fps_total:.2f}")
     print(f"Peak CUDA memory            : {peak_mem_mb:.2f} MB")
+
+    # Instance-Conditioned Heatmap: report heatmap branch params
+    if method == "instance_conditioned_heatmap":
+        ih_module = getattr(head, "instance_heatmap", None)
+        if ih_module is not None:
+            ih_params = sum(p.numel() for p in ih_module.parameters())
+            print(f"Heatmap branch parameters   : {ih_params:,}")
+
     print("=" * 70)
 
     if args.save_csv:

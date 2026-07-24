@@ -14,12 +14,17 @@ from models.box_offset import CustomBoxOffsetHead, register_box_offset_head
 from models.box_dfl import CustomBoxDFLHead, register_box_dfl_head
 from models.direct_dfl import CustomDirectDFLHead, register_direct_dfl_head
 from models.roi_heatmap import CustomROIHeatmapHead, register_roi_heatmap_head
+from models.instance_conditioned_heatmap import (
+    CustomInstanceConditionedHeatmapHead,
+    register_instance_conditioned_heatmap_head,
+)
 
 from losses.direct_loss import DirectRootLoss
 from losses.box_offset_loss import BoxOffsetRootLoss
 from losses.root_dfl_loss import RootDFLLoss
 from losses.direct_dfl_loss import DirectDFLRootLoss
 from losses.heatmap_loss import HeatmapRootLoss
+from losses.instance_conditioned_heatmap_loss import InstanceConditionedHeatmapLoss
 
 
 DEFAULT_HYPS = {
@@ -50,6 +55,7 @@ def register_model_head(cfg):
     tasks.CustomBoxDFLHead = CustomBoxDFLHead
     tasks.CustomDirectDFLHead = CustomDirectDFLHead
     tasks.CustomROIHeatmapHead = CustomROIHeatmapHead
+    tasks.CustomInstanceConditionedHeatmapHead = CustomInstanceConditionedHeatmapHead
 
     original_parse_model = getattr(tasks, "_original_parse_model", tasks.parse_model)
     tasks._original_parse_model = original_parse_model
@@ -64,6 +70,7 @@ def register_model_head(cfg):
             "CustomBoxDFLHead",
             "CustomDirectDFLHead",
             "CustomROIHeatmapHead",
+            "CustomInstanceConditionedHeatmapHead",
         }
 
         for i, (f, n, m, args) in enumerate(all_layers):
@@ -121,6 +128,28 @@ def register_model_head(cfg):
                     ch=tuple(ch_list),
                     heatmap_size=getattr(cfg, "heatmap_size", 16),
                     heatmap_decode=getattr(cfg, "heatmap_decode", "softargmax"),
+                )
+            elif method == "instance_conditioned_heatmap":
+                ih_cfg = getattr(cfg, "instance_heatmap", None)
+                if ih_cfg is None:
+                    ih_cfg = SimpleNamespace()
+                lt = getattr(ih_cfg, "level_thresholds", None)
+                if lt is None:
+                    lt = SimpleNamespace()
+                custom = CustomInstanceConditionedHeatmapHead(
+                    nc=seg.nc,
+                    nm=seg.nm,
+                    npr=seg.npr,
+                    ch=tuple(ch_list),
+                    roi_size=int(getattr(ih_cfg, "roi_size", 14)),
+                    heatmap_size=int(getattr(ih_cfg, "heatmap_size", 28)),
+                    roi_channels=int(getattr(ih_cfg, "roi_channels", 128)),
+                    decoder_channels=int(getattr(ih_cfg, "decoder_channels", 128)),
+                    roi_sampling_ratio=int(getattr(ih_cfg, "roi_sampling_ratio", 2)),
+                    roi_aligned=bool(getattr(ih_cfg, "roi_aligned", True)),
+                    p3_max=float(getattr(lt, "p3_max", 64)),
+                    p4_max=float(getattr(lt, "p4_max", 128)),
+                    decode_method=str(getattr(ih_cfg, "decode_method", "softargmax")),
                 )
             else:  # direct_regression
                 custom = CustomSegmentHead(
@@ -230,6 +259,16 @@ def build_loss(model, cfg):
             heatmap_size=getattr(cfg, "heatmap_size", 16),
             heatmap_sigma=getattr(cfg, "heatmap_sigma", 1.5),
             loss_type=getattr(cfg, "heatmap_loss_type", "mse"),
+        )
+    elif method == "instance_conditioned_heatmap":
+        ih_cfg = getattr(cfg, "instance_heatmap", None)
+        if ih_cfg is None:
+            ih_cfg = SimpleNamespace()
+        return InstanceConditionedHeatmapLoss(
+            inner_model,
+            heatmap_size=int(getattr(ih_cfg, "heatmap_size", 28)),
+            gaussian_sigma=float(getattr(ih_cfg, "gaussian_sigma", 1.5)),
+            loss_type=str(getattr(ih_cfg, "heatmap_loss", "mse")),
         )
     else:  # direct_regression
         return DirectRootLoss(inner_model)
