@@ -213,12 +213,16 @@ class InstanceConditionedHeatmapLoss(v8SegmentationLoss):
             5. Compute MSE loss averaged over all valid instances
         """
         if self._instance_heatmap is None:
-            return torch.zeros((), device=self.device)
+            raise RuntimeError(
+                "Instance-Conditioned Heatmap module was not found in the model head."
+            )
 
         # Get the stored feature maps from the head
         instance_feats = preds.get("instance_feats")
         if instance_feats is None:
-            return torch.zeros((), device=self.device)
+            raise RuntimeError(
+                "The model output does not contain instance_feats required for Instance-Conditioned Heatmap training."
+            )
 
         img_size = int(imgsz[0].item())
 
@@ -252,8 +256,8 @@ class InstanceConditionedHeatmapLoss(v8SegmentationLoss):
             )
 
         if not all_boxes:
-            # Safe zero: connected to computational graph via instance heatmap params
-            dummy = sum(p.sum() * 0 for p in self._instance_heatmap.parameters())
+            # Safe zero: connected to computational graph via instance_feats and heatmap params
+            dummy = sum(f.sum() * 0.0 for f in instance_feats) + sum(p.sum() * 0.0 for p in self._instance_heatmap.parameters())
             return dummy
 
         gt_boxes_cat = torch.cat(all_boxes, dim=0)

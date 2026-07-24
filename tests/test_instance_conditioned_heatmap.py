@@ -586,6 +586,147 @@ def test_existing_methods_still_work():
 
 
 # ---------------------------------------------------------------------------
+# Test 20: Oracle-box multi-image batch index verification
+# ---------------------------------------------------------------------------
+def test_oracle_box_batch_index_multi_image():
+    """Verify oracle-box evaluation creates ROI batch index matching image index bi."""
+    with open(str(ROOT / "experiments" / "oracle_box_eval.py"), "r", encoding="utf-8") as f:
+        oracle_source = f.read()
+
+    # Must NOT contain oracle_batch_idx = torch.zeros(1, ...)
+    assert "oracle_batch_idx = torch.zeros(1," not in oracle_source, "oracle_box_eval.py still hardcodes batch index 0"
+
+    # Must contain torch.full((1,), bi, ...)
+    assert "bi" in oracle_source and "oracle_batch_idx" in oracle_source, "oracle_box_eval.py does not use bi for oracle batch index"
+
+    print("  PASS: test_oracle_box_batch_index_multi_image")
+
+
+# ---------------------------------------------------------------------------
+# Test 21: Invalid method raises ValueError in build_model and build_loss
+# ---------------------------------------------------------------------------
+def test_invalid_method_raises_value_error():
+    """Verify that an invalid method name raises ValueError instead of silent fallback."""
+    from types import SimpleNamespace
+    from common.model_utils import build_model, build_loss
+
+    cfg_invalid = SimpleNamespace(
+        method="instance_heatmp_typo",
+        model_yaml="configs/yolo11m-seg-root.yaml",
+        pretrained_weights=None,
+        resume_weights=None,
+        nc=4,
+        names={0: "a", 1: "b", 2: "c", 3: "d"},
+    )
+
+    try:
+        build_model(cfg_invalid, device="cpu")
+        assert False, "build_model did not raise ValueError for invalid method name"
+    except ValueError as e:
+        assert "Unsupported model method" in str(e)
+
+    # Valid config model for testing build_loss
+    cfg_valid = SimpleNamespace(
+        method="instance_conditioned_heatmap",
+        model_yaml="configs/yolo11m-seg-root.yaml",
+        pretrained_weights=None,
+        resume_weights=None,
+        nc=4,
+        names={0: "a", 1: "b", 2: "c", 3: "d"},
+        instance_heatmap=SimpleNamespace(roi_size=14, heatmap_size=28, heatmap_loss="mse"),
+    )
+    model = build_model(cfg_valid, device="cpu")
+
+    try:
+        build_loss(model, cfg_invalid)
+        assert False, "build_loss did not raise ValueError for invalid method name"
+    except ValueError as e:
+        assert "Unsupported loss method" in str(e)
+
+    print("  PASS: test_invalid_method_raises_value_error")
+
+
+# ---------------------------------------------------------------------------
+# Test 22: Loss error guards and empty-instance graph connectivity
+# ---------------------------------------------------------------------------
+def test_loss_error_guards():
+    """
+    Verify:
+        1. Missing heatmap module -> RuntimeError
+        2. Missing instance_feats -> RuntimeError
+        3. Valid empty-instance batch -> returns finite graph-connected zero
+    """
+    from types import SimpleNamespace
+    from common.model_utils import build_model, build_loss
+    from losses.instance_conditioned_heatmap_loss import InstanceConditionedHeatmapLoss
+
+    cfg = SimpleNamespace(
+        method="instance_conditioned_heatmap",
+        model_yaml="configs/yolo11m-seg-root.yaml",
+        pretrained_weights=None,
+        resume_weights=None,
+        nc=4,
+        names={0: "a", 1: "b", 2: "c", 3: "d"},
+        loss_gains=SimpleNamespace(box=7.5, seg=3.0, cls=0.5, dfl=1.5, root=1.0),
+        instance_heatmap=SimpleNamespace(roi_size=14, heatmap_size=28, heatmap_loss="mse"),
+    )
+
+    model = build_model(cfg, device="cpu")
+    loss_fn = build_loss(model, cfg)
+    assert isinstance(loss_fn, InstanceConditionedHeatmapLoss), f"Expected InstanceConditionedHeatmapLoss, got {type(loss_fn)}"
+
+    # 1. Missing heatmap module -> RuntimeError
+    loss_fn._instance_heatmap = None
+    try:
+        dummy_preds = {"instance_feats": [torch.randn(1, 256, 80, 80)]}
+        dummy_batch = {"batch_idx": torch.tensor([]), "bboxes": torch.tensor([]), "keypoints": torch.tensor([])}
+        imgsz = torch.tensor([640, 640])
+        loss_fn._instance_heatmap_loss(dummy_preds, dummy_batch, imgsz)
+        assert False, "Failed to raise RuntimeError for missing heatmap module"
+    except RuntimeError as e:
+        assert "not found in the model head" in str(e)
+
+    # Restore heatmap module
+    head = model.model
+    modules = getattr(model.model, "model", None)
+    if isinstance(modules, (torch.nn.Sequential, torch.nn.ModuleList, list)):
+        head = modules[-1]
+    loss_fn._instance_heatmap = head.instance_heatmap
+
+    # 2. Missing instance_feats -> RuntimeError
+    try:
+        dummy_preds = {}
+        loss_fn._instance_heatmap_loss(dummy_preds, dummy_batch, imgsz)
+        assert False, "Failed to raise RuntimeError for missing instance_feats"
+    except RuntimeError as e:
+        assert "does not contain instance_feats" in str(e)
+
+    # 3. Valid empty-instance batch -> returns finite graph-connected zero
+    dummy_feats = [
+        torch.randn(1, 256, 80, 80, requires_grad=True),
+        torch.randn(1, 512, 40, 40, requires_grad=True),
+        torch.randn(1, 1024, 20, 20, requires_grad=True),
+    ]
+    dummy_preds = {"instance_feats": dummy_feats}
+    empty_batch = {
+        "batch_idx": torch.tensor([], dtype=torch.long),
+        "bboxes": torch.zeros((0, 4), dtype=torch.float32),
+        "keypoints": torch.zeros((0, 2), dtype=torch.float32),
+    }
+
+    zero_loss = loss_fn._instance_heatmap_loss(dummy_preds, empty_batch, imgsz)
+    assert torch.isfinite(zero_loss), f"Empty-instance loss is not finite: {zero_loss}"
+    assert zero_loss.item() == 0.0, f"Expected 0.0, got {zero_loss.item()}"
+
+    # Verify graph connectivity
+    zero_loss.backward()
+    for f in dummy_feats:
+        assert f.grad is not None, "Gradient did not flow to dummy_feats in empty-instance batch"
+
+    print("  PASS: test_loss_error_guards")
+
+
+# ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -612,7 +753,11 @@ if __name__ == "__main__":
     test_training_uses_gt_boxes()
     test_inference_uses_predicted_boxes()
     test_existing_methods_still_work()
+    test_oracle_box_batch_index_multi_image()
+    test_invalid_method_raises_value_error()
+    test_loss_error_guards()
 
     print("=" * 60)
-    print("ALL 19 INSTANCE-CONDITIONED HEATMAP TESTS PASSED")
+    print("ALL INSTANCE-CONDITIONED HEATMAP TESTS PASSED")
     print("=" * 60)
+

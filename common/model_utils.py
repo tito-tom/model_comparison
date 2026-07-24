@@ -151,13 +151,15 @@ def register_model_head(cfg):
                     p4_max=float(getattr(lt, "p4_max", 128)),
                     decode_method=str(getattr(ih_cfg, "decode_method", "softargmax")),
                 )
-            else:  # direct_regression
+            elif method == "direct_regression":
                 custom = CustomSegmentHead(
                     nc=seg.nc,
                     nm=seg.nm,
                     npr=seg.npr,
                     ch=tuple(ch_list),
                 )
+            else:
+                raise ValueError(f"Unsupported model method: {method}")
 
             for attr in ["cv2", "cv3", "cv4", "proto", "dfl"]:
                 if hasattr(seg, attr):
@@ -270,8 +272,10 @@ def build_loss(model, cfg):
             gaussian_sigma=float(getattr(ih_cfg, "gaussian_sigma", 1.5)),
             loss_type=str(getattr(ih_cfg, "heatmap_loss", "mse")),
         )
-    else:  # direct_regression
+    elif method == "direct_regression":
         return DirectRootLoss(inner_model)
+    else:
+        raise ValueError(f"Unsupported loss method: {method}")
 
 
 def patch_model_args(inner_model, cfg):

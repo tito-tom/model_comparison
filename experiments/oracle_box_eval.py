@@ -169,7 +169,9 @@ def run_oracle_evaluation(model, criterion, loader, cfg, device, split_name="tes
 
                     if method == "instance_conditioned_heatmap" and ih_module is not None:
                         # Oracle: decode heatmap using GT box
-                        oracle_batch_idx = torch.zeros(1, dtype=torch.long, device=device)
+                        oracle_batch_idx = torch.full(
+                            (1,), bi, dtype=torch.long, device=device
+                        )
                         oracle_hm_out = ih_module(
                             feats=instance_feats,
                             boxes=gt_boxes[gi:gi+1],
