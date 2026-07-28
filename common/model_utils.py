@@ -47,7 +47,22 @@ def register_model_head(cfg):
 
     method = getattr(cfg, "method", "direct_regression")
 
-    import ultralytics.nn.tasks as tasks
+    import sys
+    import models
+    import models.direct_regression
+    import models.box_offset
+    import models.box_dfl
+    import models.direct_dfl
+    import models.roi_heatmap
+    import models.instance_conditioned_heatmap
+
+    sys.modules['modules'] = models
+    sys.modules['modules.direct_regression'] = models.direct_regression
+    sys.modules['modules.box_offset'] = models.box_offset
+    sys.modules['modules.box_dfl'] = models.box_dfl
+    sys.modules['modules.direct_dfl'] = models.direct_dfl
+    sys.modules['modules.roi_heatmap'] = models.roi_heatmap
+    sys.modules['modules.instance_conditioned_heatmap'] = models.instance_conditioned_heatmap
 
     # Always register class names so YAML parser finds them
     tasks.CustomSegmentHead = CustomSegmentHead
