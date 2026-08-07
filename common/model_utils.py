@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from ultralytics import YOLO
+from ultralytics.nn import tasks
 from ultralytics.utils import DEFAULT_CFG
 
 from models.direct_regression import CustomSegmentHead, register_custom_head

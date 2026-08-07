@@ -175,21 +175,43 @@ python experiments/predict.py --config configs/instance_conditioned_heatmap.yaml
 ```
 
 ### 8. Latency & FPS Benchmarking
+
+Run fair, reproducible benchmarks across all six root-point localization models on the exact same test set:
+
 ```bash
-python experiments/benchmark.py --config configs/baseline.yaml
-python experiments/benchmark.py --config configs/direct_dfl.yaml
-python experiments/benchmark.py --config configs/box_offset.yaml
-python experiments/benchmark.py --config configs/box_dfl.yaml
-python experiments/benchmark.py --config configs/heatmap.yaml
-python experiments/benchmark.py --config configs/instance_conditioned_heatmap.yaml
+# 1. Run full comparative benchmark across all 6 models on the test set:
+python experiments/benchmark.py --device auto --warmup 50 --conf 0.25 --iou 0.45 --output-csv outputs/benchmark_comparison.csv
+
+# 2. Run benchmark on CUDA with FP16 precision:
+python experiments/benchmark.py --device cuda:0 --precision fp16 --output-csv outputs/benchmark_comparison_fp16.csv
+
+# 3. Run benchmark on a custom test set directory:
+python experiments/benchmark.py --test-set data/exp_4class/images/test --warmup 50
+
+# 4. Benchmark an individual model:
+python experiments/benchmark.py --method direct_regression
+python experiments/benchmark.py --method box_offset
+python experiments/benchmark.py --method box_dfl
+python experiments/benchmark.py --method direct_dfl
+python experiments/benchmark.py --method heatmap
+python experiments/benchmark.py --method instance_conditioned_heatmap
+
+# 5. Benchmark a custom checkpoint with custom config:
+python experiments/benchmark.py --weights outputs/instance_heatmap_best.pt --config configs/instance_conditioned_heatmap.yaml
 ```
+
+**Benchmark Table & CSV Output Format:**
+```text
+Method | Params(M) | Size(MB) | Forward(ms) | Postprocess(ms) | Total(ms) | Std(ms) | P95(ms) | FPS
+```
+*Latency excludes disk I/O (tensors preloaded in RAM), executes 50 warmups, and performs strict CUDA synchronization before/after GPU operations.*
 
 ### 9. Instance-Conditioned Heatmap Debug Visualization
 ```bash
 python experiments/debug_visualization.py --config configs/instance_conditioned_heatmap.yaml
 ```
 
-### 9. Aggregate All Experiment Metrics
+### 10. Aggregate All Experiment Metrics
 ```bash
 python experiments/aggregate_results.py --root outputs --out outputs/summary.csv
 ```
