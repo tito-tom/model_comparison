@@ -1,25 +1,43 @@
 """
-Comprehensive Root-Point Model Benchmark & Latency Comparison Script.
+Paper-ready benchmark for six YOLO-Seg-Root localization methods.
 
-Evaluates and compares six root-point localization models on the exact same test set:
-    1. Direct Regression (direct_regression)
-    2. Box Offset (box_offset)
-    3. Box-DFL (box_dfl)
-    4. Direct-DFL (direct_dfl)
-    5. Flattened Heatmap (heatmap / roi_heatmap)
-    6. Instance Heatmap (instance_conditioned_heatmap)
+Methods:
+    1. Direct Regression
+    2. Box Offset
+    3. Box-DFL
+    4. Direct-DFL
+    5. Flattened Heatmap
+    6. Instance Heatmap
 
-Key Features:
-    - Input size: 640x640, Batch size: 1.
-    - CUDA / CPU device timing with strict torch.cuda.synchronize() before/after GPU operations.
-    - Excludes disk I/O: Preloads or isolates in-memory tensor processing for timing.
-    - 50 warmup iterations before timing.
-    - Fair comparison: Unified confidence and NMS IoU thresholds, unified precision mode.
-    - Comprehensive metrics: Total Params (M), Checkpoint Size (MB), Mean Forward (ms),
-      Mean Postprocess/Root-Decode (ms), Mean Total Pipeline (ms), Std (ms), Median (ms),
-      P95 (ms), Max (ms), FPS (1000 / Mean Total ms).
-    - Outputs formatted Markdown/ASCII comparison table to console and saves to CSV.
+Benchmark protocol:
+    - Input: 640x640
+    - Batch size: 1
+    - Full test set by default
+    - 50 warm-up iterations
+    - Confidence threshold: 0.001
+    - NMS IoU threshold: 0.60
+    - Disk image loading excluded from timing
+    - True end-to-end latency:
+        preprocessing
+        -> model forward
+        -> box/root decoding
+        -> NMS
+        -> mask decoding
+        -> instance-heatmap decoding where applicable
+    - CUDA synchronized once before and once after each complete pipeline
+    - FPS = 1000 / mean end-to-end latency
+
+Reported metrics:
+    - Parameters (M)
+    - Weights size (MB)
+    - Mean latency (ms)
+    - Standard deviation (ms)
+    - Median latency (ms)
+    - P95 latency (ms)
+    - Maximum latency (ms)
+    - FPS
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,15 +46,30 @@ import glob
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+
+
+# ============================================================
+# Project setup
+# ============================================================
+
 ROOT = Path(__file__).resolve().parents[1]
+
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Ensure custom module registration for PyTorch unpickling
+
+# ============================================================
+# Register custom modules before loading checkpoints
+# ============================================================
+
 import models
 import models.box_dfl
 import models.box_offset
@@ -47,31 +80,38 @@ import models.roi_heatmap
 
 sys.modules["models"] = models
 sys.modules["modules"] = models
+
 sys.modules["modules.direct_regression"] = models.direct_regression
 sys.modules["modules.box_offset"] = models.box_offset
 sys.modules["modules.box_dfl"] = models.box_dfl
 sys.modules["modules.direct_dfl"] = models.direct_dfl
 sys.modules["modules.roi_heatmap"] = models.roi_heatmap
-sys.modules["modules.instance_conditioned_heatmap"] = models.instance_conditioned_heatmap
+sys.modules["modules.instance_conditioned_heatmap"] = (
+    models.instance_conditioned_heatmap
+)
 
 from ultralytics.nn import tasks
+
 tasks.CustomSegmentHead = models.direct_regression.CustomSegmentHead
 tasks.CustomBoxOffsetHead = models.box_offset.CustomBoxOffsetHead
 tasks.CustomBoxDFLHead = models.box_dfl.CustomBoxDFLHead
 tasks.CustomDirectDFLHead = models.direct_dfl.CustomDirectDFLHead
 tasks.CustomROIHeatmapHead = models.roi_heatmap.CustomROIHeatmapHead
-tasks.CustomInstanceConditionedHeatmapHead = models.instance_conditioned_heatmap.CustomInstanceConditionedHeatmapHead
+tasks.CustomInstanceConditionedHeatmapHead = (
+    models.instance_conditioned_heatmap.CustomInstanceConditionedHeatmapHead
+)
 
-import cv2
-import numpy as np
-import torch
-import torch.nn as nn
+
+# ============================================================
+# Ultralytics/project imports
+# ============================================================
+
 from ultralytics.utils.nms import non_max_suppression
 from ultralytics.utils.ops import process_mask, xyxy2xywh
 from ultralytics.utils.tal import make_anchors
 
 from common.config import load_config
-from common.model_utils import build_loss, build_model, resolve_device
+from common.model_utils import build_model, resolve_device
 from common.root_ops import (
     decode_box_relative_root,
     decode_direct_dfl_root,
@@ -79,23 +119,29 @@ from common.root_ops import (
 )
 
 
+# ============================================================
+# Result container
+# ============================================================
+
 @dataclass
 class ModelBenchmarkResult:
-    """Benchmark metrics for a single root-point model checkpoint."""
     method_name: str
     params_m: float
-    size_mb: float
-    forward_ms: float
-    postprocess_ms: float
-    total_ms: float
+    weights_size_mb: float
+
+    mean_ms: float
     std_ms: float
     median_ms: float
     p95_ms: float
     max_ms: float
+
     fps: float
 
 
-# Default model configurations mapping display names to config files and checkpoint paths
+# ============================================================
+# Six models
+# ============================================================
+
 MODEL_DEFINITIONS = [
     {
         "name": "Direct Regression",
@@ -136,491 +182,1077 @@ MODEL_DEFINITIONS = [
 ]
 
 
-def sync_device(device: torch.device | str) -> None:
-    """Synchronize device before and after timing if CUDA is used."""
-    dev = torch.device(device) if isinstance(device, str) else device
-    if dev.type == "cuda" and torch.cuda.is_available():
-        torch.cuda.synchronize(dev)
+# ============================================================
+# Utilities
+# ============================================================
+
+def resolve_project_path(path: str) -> str:
+    """Resolve path relative to repository root if needed."""
+
+    p = Path(path)
+
+    if p.is_absolute():
+        return str(p)
+
+    return str(ROOT / p)
 
 
-def get_device_info(device: torch.device | str) -> str:
-    """Return descriptive string for the device."""
-    dev = torch.device(device) if isinstance(device, str) else device
-    if dev.type == "cuda" and torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(dev)
-        mem_gb = torch.cuda.get_device_properties(dev).total_memory / (1024 ** 3)
-        return f"{device_name} ({mem_gb:.1f} GB VRAM, CUDA {torch.version.cuda})"
-    return f"CPU ({os.cpu_count() or 1} logical cores)"
+def sync_device(device: torch.device) -> None:
+    """Synchronize CUDA work before/after timed regions."""
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
 
 
-def load_test_images(test_dir: str, max_images: Optional[int] = None) -> List[np.ndarray]:
+def get_device_info(device: torch.device) -> str:
+    """Return readable hardware information."""
+
+    if device.type == "cuda" and torch.cuda.is_available():
+
+        name = torch.cuda.get_device_name(device)
+
+        memory_gb = (
+            torch.cuda.get_device_properties(device).total_memory
+            / (1024 ** 3)
+        )
+
+        return (
+            f"{name}, "
+            f"{memory_gb:.1f} GB VRAM, "
+            f"CUDA {torch.version.cuda}"
+        )
+
+    return f"CPU, {os.cpu_count() or 1} logical cores"
+
+
+def get_model_weights_size_mb(model: nn.Module) -> float:
     """
-    Preload test set images into memory as numpy arrays to eliminate disk I/O from benchmark timing.
+    Calculate model parameter + registered-buffer memory.
+
+    This excludes:
+        - optimizer state
+        - training epoch
+        - scheduler
+        - checkpoint metadata
+
+    Therefore it is more appropriate than raw training-checkpoint
+    size for comparing the six architectures.
+
+    Size depends on current model precision:
+        FP32 ~= 4 bytes/value
+        FP16 ~= 2 bytes/value
     """
-    if not os.path.exists(test_dir):
-        raise FileNotFoundError(f"Test directory not found: {test_dir}")
+
+    parameter_bytes = sum(
+        p.numel() * p.element_size()
+        for p in model.parameters()
+    )
+
+    buffer_bytes = sum(
+        b.numel() * b.element_size()
+        for b in model.buffers()
+    )
+
+    total_bytes = parameter_bytes + buffer_bytes
+
+    return total_bytes / (1024 ** 2)
+
+
+# ============================================================
+# Preprocessing
+# ============================================================
+
+def letterbox(
+    image: np.ndarray,
+    new_shape: int = 640,
+    color: int = 114,
+) -> Tuple[np.ndarray, float, Tuple[int, int]]:
+    """
+    Aspect-ratio-preserving resize followed by padding.
+
+    Padding value = 114, matching YOLO preprocessing.
+    """
+
+    h0, w0 = image.shape[:2]
+
+    gain = min(
+        new_shape / w0,
+        new_shape / h0,
+    )
+
+    new_w = int(round(w0 * gain))
+    new_h = int(round(h0 * gain))
+
+    pad_w = (new_shape - new_w) / 2.0
+    pad_h = (new_shape - new_h) / 2.0
+
+    resized = cv2.resize(
+        image,
+        (new_w, new_h),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    canvas = np.full(
+        (new_shape, new_shape, 3),
+        color,
+        dtype=np.uint8,
+    )
+
+    left = int(round(pad_w - 0.1))
+    top = int(round(pad_h - 0.1))
+
+    canvas[
+        top : top + new_h,
+        left : left + new_w,
+    ] = resized
+
+    return canvas, gain, (left, top)
+
+
+def preprocess_image(
+    image_bgr: np.ndarray,
+    img_size: int,
+    device: torch.device,
+    half: bool,
+) -> torch.Tensor:
+    """
+    Complete preprocessing included in latency measurement:
+
+        letterbox
+        -> BGR to RGB
+        -> CHW
+        -> batch dimension
+        -> tensor
+        -> GPU transfer
+        -> FP32/FP16 conversion
+        -> normalization
+    """
+
+    image, _, _ = letterbox(
+        image_bgr,
+        new_shape=img_size,
+    )
+
+    image = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB,
+    )
+
+    image = np.ascontiguousarray(
+        image.transpose(2, 0, 1)
+    )
+
+    tensor = torch.from_numpy(image).unsqueeze(0)
+
+    tensor = tensor.to(
+        device,
+        non_blocking=False,
+    )
+
+    if half:
+        tensor = tensor.half()
+    else:
+        tensor = tensor.float()
+
+    tensor /= 255.0
+
+    return tensor
+
+
+# ============================================================
+# Dataset loading
+# ============================================================
+
+def load_test_images(
+    test_dir: str,
+    max_images: Optional[int] = None,
+) -> List[np.ndarray]:
+    """
+    Load all test images into RAM before timing.
+
+    Disk I/O is therefore excluded from benchmark latency.
+    """
+
+    test_dir = resolve_project_path(test_dir)
+
+    if not os.path.isdir(test_dir):
+        raise FileNotFoundError(
+            f"Test directory not found: {test_dir}"
+        )
 
     image_paths: List[str] = []
-    for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
-        image_paths.extend(glob.glob(os.path.join(test_dir, ext)))
+
+    extensions = [
+        "*.jpg",
+        "*.jpeg",
+        "*.png",
+        "*.bmp",
+        "*.JPG",
+        "*.JPEG",
+        "*.PNG",
+    ]
+
+    for extension in extensions:
+        image_paths.extend(
+            glob.glob(
+                os.path.join(
+                    test_dir,
+                    extension,
+                )
+            )
+        )
 
     image_paths = sorted(image_paths)
+
     if not image_paths:
-        raise FileNotFoundError(f"No test images found in: {test_dir}")
+        raise FileNotFoundError(
+            f"No images found in: {test_dir}"
+        )
 
     if max_images is not None and max_images > 0:
         image_paths = image_paths[:max_images]
 
-    preloaded_images: List[np.ndarray] = []
-    print(f"Preloading {len(image_paths)} test images from {test_dir} into RAM...")
-    for p in image_paths:
-        img = cv2.imread(p)
-        if img is not None:
-            preloaded_images.append(img)
+    print(
+        f"Preloading {len(image_paths)} images into RAM..."
+    )
 
-    print(f"Successfully loaded {len(preloaded_images)} images into memory.")
-    return preloaded_images
+    images: List[np.ndarray] = []
+
+    for path in image_paths:
+
+        image = cv2.imread(path)
+
+        if image is None:
+            raise RuntimeError(
+                f"Failed to read image: {path}"
+            )
+
+        images.append(image)
+
+    print(
+        f"Successfully loaded {len(images)} images."
+    )
+
+    return images
 
 
-def preprocess_tensor(img_bgr: np.ndarray, img_size: int, device: torch.device, half: bool = False) -> torch.Tensor:
-    """
-    Preprocess BGR image to normalized PyTorch tensor [1, 3, img_size, img_size].
-    """
-    img = cv2.resize(img_bgr, (img_size, img_size))
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    tensor = torch.from_numpy(img_rgb.transpose(2, 0, 1)).unsqueeze(0).to(device)
-    tensor = tensor.half() / 255.0 if half else tensor.float() / 255.0
-    return tensor
-
+# ============================================================
+# Model loading
+# ============================================================
 
 def load_benchmark_model(
     cfg_path: str,
-    ckpt_path: str,
+    checkpoint_path: str,
     device: torch.device,
-    half: bool = False,
+    half: bool,
 ) -> Tuple[nn.Module, Any, Any]:
     """
-    Load model and criterion from config and checkpoint.
-    Reuses existing build_model and build_loss modules.
+    Load trained model while preserving the repository's custom heads.
     """
+
+    cfg_path = resolve_project_path(cfg_path)
+    checkpoint_path = resolve_project_path(checkpoint_path)
+
+    if not os.path.isfile(cfg_path):
+        raise FileNotFoundError(
+            f"Config not found: {cfg_path}"
+        )
+
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}"
+        )
+
     cfg = load_config(cfg_path)
-    cfg.resume_weights = ckpt_path
+    cfg.resume_weights = checkpoint_path
 
-    # Try direct model loading if pickled in checkpoint, or build via repository's build_model
     inner_model = None
-    if os.path.exists(ckpt_path):
-        try:
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            if isinstance(ckpt, dict) and "model" in ckpt and isinstance(ckpt["model"], torch.nn.Module):
-                inner_model = ckpt["model"].to(device)
-        except Exception as exc:
-            print(f"Direct ckpt load note: {exc}, building model via registry...")
 
+    # Try loading serialized model directly.
+    try:
+
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        if (
+            isinstance(checkpoint, dict)
+            and "model" in checkpoint
+            and isinstance(
+                checkpoint["model"],
+                torch.nn.Module,
+            )
+        ):
+
+            inner_model = checkpoint["model"].to(device)
+
+    except Exception as exc:
+
+        print(
+            f"Direct checkpoint loading unavailable: {exc}"
+        )
+
+    # Fallback to repository's normal model builder.
     if inner_model is None:
-        model = build_model(cfg, device)
-        inner_model = getattr(model, "model", model)
+
+        wrapper = build_model(
+            cfg,
+            device,
+        )
+
+        inner_model = getattr(
+            wrapper,
+            "model",
+            wrapper,
+        )
 
     inner_model.eval()
+
     if half:
         inner_model.half()
+    else:
+        inner_model.float()
 
-    # Set training flag on head so raw head outputs dictionary is returned
+    # Repository uses raw head outputs for custom decoding.
     head = inner_model
-    modules = getattr(inner_model, "model", None)
-    if isinstance(modules, (torch.nn.Sequential, torch.nn.ModuleList, list)):
+
+    modules = getattr(
+        inner_model,
+        "model",
+        None,
+    )
+
+    if isinstance(
+        modules,
+        (
+            torch.nn.Sequential,
+            torch.nn.ModuleList,
+            list,
+        ),
+    ):
         head = modules[-1]
+
+    # Required so custom head returns raw prediction dictionary.
     head.training = True
 
     return inner_model, head, cfg
 
 
+# ============================================================
+# Bounding-box decoding
+# ============================================================
+
 def decode_bboxes_from_dist(
     pred_distri: torch.Tensor,
     anchor_points: torch.Tensor,
     stride_tensor: torch.Tensor,
-    device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
     """
-    Decode bounding box distribution to pixel xyxy boxes.
+    Decode YOLO DFL bounding-box predictions into xyxy pixels.
     """
-    b, a, c = pred_distri.shape
-    num_bins = c // 4
-    proj = torch.arange(num_bins, dtype=dtype, device=device)
-    dist = pred_distri.view(b, a, 4, num_bins).softmax(3).matmul(proj)
-    lt, rb = dist.chunk(2, -1)
-    x1y1 = anchor_points - lt
-    x2y2 = anchor_points + rb
-    pred_bboxes = torch.cat([x1y1, x2y2], -1)
-    return pred_bboxes * stride_tensor
 
+    batch, anchors, channels = pred_distri.shape
+
+    num_bins = channels // 4
+
+    projection = torch.arange(
+        num_bins,
+        dtype=dtype,
+        device=pred_distri.device,
+    )
+
+    distances = (
+        pred_distri
+        .view(
+            batch,
+            anchors,
+            4,
+            num_bins,
+        )
+        .softmax(3)
+        .matmul(projection)
+    )
+
+    left_top, right_bottom = distances.chunk(
+        2,
+        dim=-1,
+    )
+
+    xy1 = anchor_points - left_top
+    xy2 = anchor_points + right_bottom
+
+    boxes = torch.cat(
+        [xy1, xy2],
+        dim=-1,
+    )
+
+    boxes *= stride_tensor
+
+    return boxes
+
+
+# ============================================================
+# Complete perception pipeline
+# ============================================================
+
+def run_pipeline(
+    image_bgr: np.ndarray,
+    inner_model: nn.Module,
+    head: nn.Module,
+    cfg: Any,
+    device: torch.device,
+    img_size: int,
+    conf_thres: float,
+    iou_thres: float,
+    half: bool,
+) -> None:
+    """
+    Execute complete perception pipeline for one image.
+
+    The function intentionally returns nothing because benchmark timing
+    only requires the computations to be fully executed.
+    """
+
+    # --------------------------------------------------------
+    # 1. Preprocessing
+    # --------------------------------------------------------
+
+    x = preprocess_image(
+        image_bgr,
+        img_size,
+        device,
+        half,
+    )
+
+    # --------------------------------------------------------
+    # 2. Model forward
+    # --------------------------------------------------------
+
+    with torch.inference_mode():
+
+        preds = inner_model(x)
+
+        feats = preds["feats"]
+        pred_masks_raw = preds["mask_coefficient"]
+        proto = preds["proto"]
+        pred_kpts_raw = preds["kpts"]
+        pred_scores = preds["scores"]
+
+        # ----------------------------------------------------
+        # 3. Detection box decoding
+        # ----------------------------------------------------
+
+        anchor_points, stride_tensor = make_anchors(
+            feats,
+            head.stride,
+            0.5,
+        )
+
+        pred_distri = (
+            preds["boxes"]
+            .permute(0, 2, 1)
+            .contiguous()
+        )
+
+        pred_boxes = decode_bboxes_from_dist(
+            pred_distri,
+            anchor_points,
+            stride_tensor,
+            x.dtype,
+        )
+
+        # ----------------------------------------------------
+        # 4. Method-specific root decoding
+        # ----------------------------------------------------
+
+        root_raw = (
+            pred_kpts_raw
+            .permute(0, 2, 1)
+            .contiguous()
+        )
+
+        if isinstance(
+            head,
+            models.direct_regression.CustomSegmentHead,
+        ):
+
+            pred_roots = decode_direct_root(
+                root_raw,
+                anchor_points,
+                stride_tensor,
+            )
+
+        elif isinstance(
+            head,
+            models.direct_dfl.CustomDirectDFLHead,
+        ):
+
+            pred_roots = decode_direct_dfl_root(
+                root_raw,
+                img_size,
+                img_size,
+            )
+
+        elif isinstance(
+            head,
+            models.instance_conditioned_heatmap
+            .CustomInstanceConditionedHeatmapHead,
+        ):
+
+            # Instance heatmap roots are calculated after NMS.
+            pred_roots = torch.zeros_like(
+                root_raw
+            )
+
+        else:
+
+            # Box Offset
+            # Box-DFL
+            # Flattened Heatmap
+            pred_roots = decode_box_relative_root(
+                root_raw,
+                pred_boxes,
+            )
+
+        # ----------------------------------------------------
+        # 5. NMS
+        # ----------------------------------------------------
+
+        nms_input = torch.cat(
+            [
+                xyxy2xywh(
+                    pred_boxes
+                ).permute(0, 2, 1),
+
+                pred_scores.sigmoid(),
+
+                pred_masks_raw,
+
+                pred_roots.permute(
+                    0,
+                    2,
+                    1,
+                ),
+            ],
+            dim=1,
+        )
+
+        detections = non_max_suppression(
+            nms_input,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            nc=int(cfg.nc),
+        )
+
+        # ----------------------------------------------------
+        # 6. Instance-mask decoding
+        # ----------------------------------------------------
+
+        for batch_index, det in enumerate(detections):
+
+            if det is None or len(det) == 0:
+                continue
+
+            boxes = det[:, :4]
+
+            mask_coefficients = det[
+                :,
+                6 : 6 + head.nm,
+            ]
+
+            masks = process_mask(
+                proto[batch_index],
+                mask_coefficients,
+                boxes,
+                shape=(
+                    img_size,
+                    img_size,
+                ),
+                upsample=True,
+            )
+
+            # Force actual threshold computation.
+            masks = masks > 0.5
+
+        # ----------------------------------------------------
+        # 7. Instance-conditioned heatmap decoding
+        # ----------------------------------------------------
+
+        if isinstance(
+            head,
+            models.instance_conditioned_heatmap
+            .CustomInstanceConditionedHeatmapHead,
+        ):
+
+            heatmap_module = getattr(
+                head,
+                "instance_heatmap",
+                None,
+            )
+
+            instance_feats = preds.get(
+                "instance_feats"
+            )
+
+            if heatmap_module is None:
+                raise RuntimeError(
+                    "Instance Heatmap module missing."
+                )
+
+            if instance_feats is None:
+                raise RuntimeError(
+                    "Instance Heatmap features missing."
+                )
+
+            heatmap_cfg = getattr(
+                cfg,
+                "instance_heatmap",
+                None,
+            )
+
+            if heatmap_cfg is not None:
+
+                decode_method = str(
+                    getattr(
+                        heatmap_cfg,
+                        "decode_method",
+                        "softargmax",
+                    )
+                )
+
+            else:
+                decode_method = "softargmax"
+
+            for batch_index, det in enumerate(detections):
+
+                if det is None or len(det) == 0:
+                    continue
+
+                boxes = det[:, :4]
+
+                batch_indices = torch.full(
+                    (len(boxes),),
+                    batch_index,
+                    dtype=torch.long,
+                    device=boxes.device,
+                )
+
+                heatmap_output = heatmap_module(
+                    feats=instance_feats,
+                    boxes=boxes,
+                    batch_indices=batch_indices,
+                )
+
+                roots = heatmap_module.decode_roots(
+                    heatmap_output["heatmap_logits"],
+                    boxes,
+                    decode_method=decode_method,
+                )
+
+                # Ensure decoding is fully executed.
+                _ = roots
+
+
+# ============================================================
+# Single-model benchmark
+# ============================================================
 
 def benchmark_single_model(
     model_info: Dict[str, str],
-    preloaded_images: List[np.ndarray],
+    images: List[np.ndarray],
     device: torch.device,
-    img_size: int = 640,
-    warmup_iters: int = 50,
-    conf_thres: float = 0.25,
-    iou_thres: float = 0.45,
-    half: bool = False,
-    include_masks: bool = False,
+    img_size: int,
+    warmup_iters: int,
+    conf_thres: float,
+    iou_thres: float,
+    half: bool,
 ) -> ModelBenchmarkResult:
-    """
-    Benchmark forward latency, postprocessing latency, and total latency for a single root-point model.
-    """
-    display_name = model_info["name"]
-    config_file = model_info["config_file"]
-    checkpoint_file = model_info["checkpoint_file"]
 
-    print(f"\n[{display_name}] Loading checkpoint: {checkpoint_file} ...")
-    if not os.path.exists(checkpoint_file):
-        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_file}")
+    method_name = model_info["name"]
 
-    ckpt_size_mb = os.path.getsize(checkpoint_file) / (1024 * 1024)
+    cfg_path = model_info["config_file"]
+    checkpoint_path = model_info["checkpoint_file"]
 
-    # Load model and loss criterion
-    inner_model, head, cfg = load_benchmark_model(config_file, checkpoint_file, device, half=half)
+    print("\n" + "=" * 80)
+    print(f"Benchmarking: {method_name}")
+    print("=" * 80)
 
-    total_params = sum(p.numel() for p in inner_model.parameters())
-    params_m = total_params / 1e6
+    inner_model, head, cfg = load_benchmark_model(
+        cfg_path,
+        checkpoint_path,
+        device,
+        half,
+    )
 
-    # Pre-generate tensors for test images to completely decouple disk I/O and RAM conversions
-    input_tensors = [preprocess_tensor(img, img_size, device, half=half) for img in preloaded_images]
+    # --------------------------------------------------------
+    # Model complexity
+    # --------------------------------------------------------
 
-    # Warmup iterations
-    print(f"[{display_name}] Executing {warmup_iters} warmup iterations...")
-    warmup_tensor = input_tensors[0] if input_tensors else preprocess_tensor(preloaded_images[0], img_size, device, half=half)
-    for _ in range(warmup_iters):
-        with torch.no_grad():
-            preds = inner_model(warmup_tensor)
-            feats = preds["feats"]
-            pred_masks_raw = preds["mask_coefficient"]
-            pred_kpts_raw = preds["kpts"]
-            anchor_points, stride_tensor = make_anchors(feats, head.stride, 0.5)
-            pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
-            pred_bboxes_s = decode_bboxes_from_dist(pred_distri, anchor_points, stride_tensor, device, warmup_tensor.dtype)
-            
-            # Root decoding warmup
-            if isinstance(head, models.direct_regression.CustomSegmentHead):
-                pred_roots = decode_direct_root(pred_kpts_raw.permute(0, 2, 1).contiguous(), anchor_points, stride_tensor)
-            elif isinstance(head, models.direct_dfl.CustomDirectDFLHead):
-                pred_roots = decode_direct_dfl_root(pred_kpts_raw.permute(0, 2, 1).contiguous(), img_size, img_size)
-            elif isinstance(head, models.instance_conditioned_heatmap.CustomInstanceConditionedHeatmapHead):
-                pred_roots = torch.zeros_like(pred_kpts_raw.permute(0, 2, 1).contiguous())
-            else:
-                pred_roots = decode_box_relative_root(pred_kpts_raw.permute(0, 2, 1).contiguous(), pred_bboxes_s)
+    total_parameters = sum(
+        p.numel()
+        for p in inner_model.parameters()
+    )
 
-            nms_input = torch.cat(
-                [xyxy2xywh(pred_bboxes_s).permute(0, 2, 1), preds["scores"].sigmoid(), pred_masks_raw, pred_roots.permute(0, 2, 1)],
-                dim=1,
-            )
-            _ = non_max_suppression(nms_input, conf_thres=conf_thres, iou_thres=iou_thres, nc=int(cfg.nc))
-    
-    sync_device(device)
-    print(f"[{display_name}] Warmup complete. Benchmarking {len(input_tensors)} test iterations...")
+    params_m = total_parameters / 1e6
 
-    forward_times: List[float] = []
-    postprocess_times: List[float] = []
-    total_pipeline_times: List[float] = []
-
-    for x in input_tensors:
-        # Measure Model Forward Latency
-        sync_device(device)
-        t_fwd_start = time.perf_counter()
-        with torch.no_grad():
-            preds = inner_model(x)
-        sync_device(device)
-        t_fwd_end = time.perf_counter()
-        fwd_ms = (t_fwd_end - t_fwd_start) * 1000.0
-
-        # Measure Postprocessing & Root-Decoding Latency
-        sync_device(device)
-        t_post_start = time.perf_counter()
-        with torch.no_grad():
-            feats = preds["feats"]
-            pred_masks_raw = preds["mask_coefficient"]
-            proto = preds["proto"]
-            pred_kpts_raw = preds["kpts"]
-
-            anchor_points, stride_tensor = make_anchors(feats, head.stride, 0.5)
-            pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
-            pred_scores = preds["scores"]
-
-            # Bounding box decode
-            pred_bboxes_s = decode_bboxes_from_dist(pred_distri, anchor_points, stride_tensor, device, x.dtype)
-
-            # Method-specific root-point decoding
-            if isinstance(head, models.direct_regression.CustomSegmentHead):
-                # 1. Direct Regression: absolute offset from anchor points
-                pred_roots = decode_direct_root(
-                    pred_kpts_raw.permute(0, 2, 1).contiguous(),
-                    anchor_points,
-                    stride_tensor,
-                )
-            elif isinstance(head, models.direct_dfl.CustomDirectDFLHead):
-                # 2. Direct-DFL: image-normalized expected values scaled to image dimensions
-                pred_roots = decode_direct_dfl_root(
-                    pred_kpts_raw.permute(0, 2, 1).contiguous(),
-                    img_size,
-                    img_size,
-                )
-            elif isinstance(head, models.instance_conditioned_heatmap.CustomInstanceConditionedHeatmapHead):
-                # 3. Instance Heatmap: placeholder for NMS; actual decoding happens post-NMS via ROI Align
-                pred_roots = torch.zeros_like(
-                    pred_kpts_raw.permute(0, 2, 1).contiguous()
-                )
-            else:
-                # 4. Box Offset, Box-DFL, Flattened Heatmap: box-relative root coordinates scaled by box dimensions
-                pred_roots = decode_box_relative_root(
-                    pred_kpts_raw.permute(0, 2, 1).contiguous(),
-                    pred_bboxes_s,
-                )
-
-            # NMS suppression
-            nms_input = torch.cat(
-                [
-                    xyxy2xywh(pred_bboxes_s).permute(0, 2, 1),
-                    pred_scores.sigmoid(),
-                    pred_masks_raw,
-                    pred_roots.permute(0, 2, 1),
-                ],
-                dim=1,
-            )
-
-            detections = non_max_suppression(
-                nms_input,
-                conf_thres=conf_thres,
-                iou_thres=iou_thres,
-                nc=int(cfg.nc),
-            )
-
-            # Optional mask coefficient decoding if requested
-            if include_masks:
-                for bi, det in enumerate(detections):
-                    if det is not None and len(det) > 0:
-                        try:
-                            _ = process_mask(
-                                proto[bi],
-                                det[:, 6 : 6 + head.nm],
-                                det[:, :4],
-                                shape=(img_size, img_size),
-                                upsample=True,
-                            )
-                        except Exception:
-                            pass
-
-            # Instance Heatmap: ROI Align extraction and per-instance heatmap CNN decoding
-            if isinstance(head, models.instance_conditioned_heatmap.CustomInstanceConditionedHeatmapHead):
-                ih_module = getattr(head, "instance_heatmap", None)
-                instance_feats = preds.get("instance_feats")
-                if ih_module is not None and instance_feats is not None:
-                    ih_cfg = getattr(cfg, "instance_heatmap", None)
-                    decode_method = str(getattr(ih_cfg, "decode_method", "argmax")) if ih_cfg else "argmax"
-                    for bi, det in enumerate(detections):
-                        if det is not None and len(det) > 0:
-                            p_boxes = det[:, :4]
-                            batch_idx_det = torch.full(
-                                (len(p_boxes),), bi, dtype=torch.long, device=p_boxes.device
-                            )
-                            # ROI Align and heatmap decoder
-                            hm_out = ih_module(
-                                feats=instance_feats,
-                                boxes=p_boxes,
-                                batch_indices=batch_idx_det,
-                            )
-                            decoded_roots = ih_module.decode_roots(
-                                hm_out["heatmap_logits"],
-                                p_boxes,
-                                decode_method=decode_method,
-                            )
-                            det[:, 6 + head.nm : 6 + head.nm + 2] = decoded_roots
-
-        sync_device(device)
-        t_post_end = time.perf_counter()
-        post_ms = (t_post_end - t_post_start) * 1000.0
-
-        total_pipe_ms = fwd_ms + post_ms
-
-        forward_times.append(fwd_ms)
-        postprocess_times.append(post_ms)
-        total_pipeline_times.append(total_pipe_ms)
-
-    mean_fwd = float(np.mean(forward_times))
-    mean_post = float(np.mean(postprocess_times))
-    mean_total = float(np.mean(total_pipeline_times))
-    std_total = float(np.std(total_pipeline_times))
-    median_total = float(np.median(total_pipeline_times))
-    p95_total = float(np.percentile(total_pipeline_times, 95))
-    max_total = float(np.max(total_pipeline_times))
-    fps = 1000.0 / mean_total if mean_total > 0 else 0.0
-
-    result = ModelBenchmarkResult(
-        method_name=display_name,
-        params_m=round(params_m, 2),
-        size_mb=round(ckpt_size_mb, 2),
-        forward_ms=round(mean_fwd, 2),
-        postprocess_ms=round(mean_post, 2),
-        total_ms=round(mean_total, 2),
-        std_ms=round(std_total, 2),
-        median_ms=round(median_total, 2),
-        p95_ms=round(p95_total, 2),
-        max_ms=round(max_total, 2),
-        fps=round(fps, 1),
+    weights_size_mb = get_model_weights_size_mb(
+        inner_model
     )
 
     print(
-        f"[{display_name}] Forward: {result.forward_ms:.2f}ms | "
-        f"Postprocess: {result.postprocess_ms:.2f}ms | "
-        f"Total: {result.total_ms:.2f}ms | "
-        f"Std: {result.std_ms:.2f}ms | "
-        f"P95: {result.p95_ms:.2f}ms | "
-        f"FPS: {result.fps:.1f}"
+        f"Parameters       : {params_m:.3f} M"
     )
 
-    return result
+    print(
+        f"Weights size     : {weights_size_mb:.2f} MB"
+    )
 
+    # --------------------------------------------------------
+    # Warm-up
+    # --------------------------------------------------------
 
-def print_comparison_table(results: List[ModelBenchmarkResult]) -> None:
-    """
-    Print formatted comparison table matching the required format:
-    Method | Params(M) | Size(MB) | Forward(ms) | Postprocess(ms) | Total(ms) | Std(ms) | P95(ms) | FPS
-    """
-    header = "Method | Params(M) | Size(MB) | Forward(ms) | Postprocess(ms) | Total(ms) | Std(ms) | P95(ms) | FPS"
-    separator = "-" * len(header)
+    print(
+        f"Warm-up          : {warmup_iters} iterations"
+    )
 
-    print("\n" + "=" * 90)
-    print("FINAL BENCHMARK COMPARISON TABLE")
-    print("=" * 90)
-    print(header)
-    print(separator)
+    for index in range(warmup_iters):
 
-    for r in results:
-        row = (
-            f"{r.method_name:<18} | "
-            f"{r.params_m:>9.2f} | "
-            f"{r.size_mb:>8.2f} | "
-            f"{r.forward_ms:>11.2f} | "
-            f"{r.postprocess_ms:>15.2f} | "
-            f"{r.total_ms:>9.2f} | "
-            f"{r.std_ms:>7.2f} | "
-            f"{r.p95_ms:>7.2f} | "
-            f"{r.fps:>5.1f}"
+        image = images[
+            index % len(images)
+        ]
+
+        sync_device(device)
+
+        run_pipeline(
+            image_bgr=image,
+            inner_model=inner_model,
+            head=head,
+            cfg=cfg,
+            device=device,
+            img_size=img_size,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            half=half,
         )
-        print(row)
 
-    print("=" * 90)
+        sync_device(device)
+
+    # --------------------------------------------------------
+    # Benchmark
+    # --------------------------------------------------------
+
+    print(
+        f"Timed images     : {len(images)}"
+    )
+
+    latency_ms: List[float] = []
+
+    for image in images:
+
+        # One synchronization before full pipeline
+        sync_device(device)
+
+        start = time.perf_counter()
+
+        run_pipeline(
+            image_bgr=image,
+            inner_model=inner_model,
+            head=head,
+            cfg=cfg,
+            device=device,
+            img_size=img_size,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            half=half,
+        )
+
+        # One synchronization after full pipeline
+        sync_device(device)
+
+        end = time.perf_counter()
+
+        latency_ms.append(
+            (end - start) * 1000.0
+        )
+
+    # --------------------------------------------------------
+    # Statistics
+    # --------------------------------------------------------
+
+    latency_array = np.asarray(
+        latency_ms,
+        dtype=np.float64,
+    )
+
+    mean_ms = float(
+        np.mean(latency_array)
+    )
+
+    if len(latency_array) > 1:
+
+        std_ms = float(
+            np.std(
+                latency_array,
+                ddof=1,
+            )
+        )
+
+    else:
+        std_ms = 0.0
+
+    median_ms = float(
+        np.median(latency_array)
+    )
+
+    p95_ms = float(
+        np.percentile(
+            latency_array,
+            95,
+        )
+    )
+
+    max_ms = float(
+        np.max(latency_array)
+    )
+
+    fps = (
+        1000.0 / mean_ms
+        if mean_ms > 0
+        else 0.0
+    )
+
+    # --------------------------------------------------------
+    # Print single result
+    # --------------------------------------------------------
+
+    print(
+        f"Mean latency     : {mean_ms:.2f} ms"
+    )
+
+    print(
+        f"Std latency      : {std_ms:.2f} ms"
+    )
+
+    print(
+        f"Median latency   : {median_ms:.2f} ms"
+    )
+
+    print(
+        f"P95 latency      : {p95_ms:.2f} ms"
+    )
+
+    print(
+        f"Max latency      : {max_ms:.2f} ms"
+    )
+
+    print(
+        f"FPS              : {fps:.2f}"
+    )
+
+    return ModelBenchmarkResult(
+        method_name=method_name,
+        params_m=params_m,
+        weights_size_mb=weights_size_mb,
+        mean_ms=mean_ms,
+        std_ms=std_ms,
+        median_ms=median_ms,
+        p95_ms=p95_ms,
+        max_ms=max_ms,
+        fps=fps,
+    )
 
 
-def save_results_to_csv(results: List[ModelBenchmarkResult], csv_path: str) -> None:
-    """
-    Save benchmark comparison results to CSV in the exact required format.
-    """
-    os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
+# ============================================================
+# Results output
+# ============================================================
 
-    fieldnames = [
+def print_results(
+    results: List[ModelBenchmarkResult],
+) -> None:
+
+    print("\n")
+    print("=" * 115)
+    print(
+        "FINAL ROOT-POINT MODEL BENCHMARK"
+    )
+    print("=" * 115)
+
+    header = (
+        f"{'Method':<26}"
+        f"{'Params(M)':>12}"
+        f"{'Weights(MB)':>14}"
+        f"{'Mean(ms)':>12}"
+        f"{'Std(ms)':>11}"
+        f"{'Median(ms)':>13}"
+        f"{'P95(ms)':>11}"
+        f"{'Max(ms)':>11}"
+        f"{'FPS':>9}"
+    )
+
+    print(header)
+    print("-" * 115)
+
+    for result in results:
+
+        print(
+            f"{result.method_name:<26}"
+            f"{result.params_m:>12.3f}"
+            f"{result.weights_size_mb:>14.2f}"
+            f"{result.mean_ms:>12.2f}"
+            f"{result.std_ms:>11.2f}"
+            f"{result.median_ms:>13.2f}"
+            f"{result.p95_ms:>11.2f}"
+            f"{result.max_ms:>11.2f}"
+            f"{result.fps:>9.2f}"
+        )
+
+    print("=" * 115)
+
+
+def save_csv(
+    results: List[ModelBenchmarkResult],
+    output_path: str,
+) -> None:
+
+    output_path = resolve_project_path(
+        output_path
+    )
+
+    output_parent = os.path.dirname(
+        output_path
+    )
+
+    if output_parent:
+        os.makedirs(
+            output_parent,
+            exist_ok=True,
+        )
+
+    header = [
         "Method",
-        "Params(M)",
-        "Size(MB)",
-        "Forward(ms)",
-        "Postprocess(ms)",
-        "Total(ms)",
-        "Std(ms)",
-        "P95(ms)",
+        "Params (M)",
+        "Weights Size (MB)",
+        "Mean E2E Latency (ms)",
+        "Std (ms)",
+        "Median (ms)",
+        "P95 (ms)",
+        "Max (ms)",
         "FPS",
     ]
 
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(fieldnames)
-        for r in results:
-            writer.writerow([
-                r.method_name,
-                f"{r.params_m:.2f}",
-                f"{r.size_mb:.2f}",
-                f"{r.forward_ms:.2f}",
-                f"{r.postprocess_ms:.2f}",
-                f"{r.total_ms:.2f}",
-                f"{r.std_ms:.2f}",
-                f"{r.p95_ms:.2f}",
-                f"{r.fps:.1f}",
-            ])
+    with open(
+        output_path,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
 
-    print(f"\nSuccessfully saved benchmark comparison CSV to: {csv_path}")
+        writer = csv.writer(file)
 
+        writer.writerow(header)
 
-def parse_arguments() -> argparse.Namespace:
-    """CLI argument parser with descriptive help strings."""
-    parser = argparse.ArgumentParser(
-        description="Unified Comparative Benchmark for 6 YOLO-Seg Root-Point Localization Models",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        for result in results:
+
+            writer.writerow(
+                [
+                    result.method_name,
+                    f"{result.params_m:.3f}",
+                    f"{result.weights_size_mb:.2f}",
+                    f"{result.mean_ms:.2f}",
+                    f"{result.std_ms:.2f}",
+                    f"{result.median_ms:.2f}",
+                    f"{result.p95_ms:.2f}",
+                    f"{result.max_ms:.2f}",
+                    f"{result.fps:.2f}",
+                ]
+            )
+
+    print(
+        f"\nCSV saved to: {output_path}"
     )
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Paper-ready benchmark for six "
+            "YOLO-Seg-Root localization methods"
+        ),
+        formatter_class=(
+            argparse.ArgumentDefaultsHelpFormatter
+        ),
+    )
+
     parser.add_argument(
         "--test-set",
-        "--source",
-        dest="test_set",
         default="data/exp_4class/images/test",
-        help="Path to directory containing test set images.",
+        help="Directory containing test images.",
     )
+
     parser.add_argument(
         "--device",
         default="auto",
-        help="Device to run benchmark on ('auto', 'cuda', 'cuda:0', 'cpu').",
+        help="auto, cuda, cuda:0, cpu, ...",
     )
+
     parser.add_argument(
         "--img-size",
-        "--imgsz",
-        dest="img_size",
         type=int,
         default=640,
-        help="Square input image resolution (640 for 640x640).",
     )
+
     parser.add_argument(
         "--batch-size",
         type=int,
         default=1,
-        help="Batch size for benchmark evaluation.",
+        help="Strictly fixed to 1.",
     )
+
     parser.add_argument(
         "--warmup",
         type=int,
         default=50,
-        help="Number of warmup iterations before latency timing.",
     )
+
     parser.add_argument(
         "--conf",
         type=float,
-        default=0.25,
-        help="Confidence threshold for post-processing and NMS.",
+        default=0.001,
     )
+
     parser.add_argument(
         "--iou",
         type=float,
-        default=0.45,
-        help="IoU threshold for NMS suppression.",
+        default=0.60,
     )
+
     parser.add_argument(
         "--precision",
-        choices=["fp32", "fp16", "half"],
+        choices=[
+            "fp32",
+            "fp16",
+        ],
         default="fp32",
-        help="Precision mode for model weights and inference.",
     )
+
     parser.add_argument(
         "--max-images",
         type=int,
         default=None,
-        help="Maximum number of test images to evaluate (default: full test set).",
+        help=(
+            "Optional debugging limit. "
+            "Default uses complete test set."
+        ),
     )
-    parser.add_argument(
-        "--output-csv",
-        default="outputs/benchmark_comparison.csv",
-        help="Path to save the benchmark summary CSV.",
-    )
-    parser.add_argument(
-        "--include-masks",
-        action="store_true",
-        help="Include full mask prototype decoding in postprocessing timing.",
-    )
+
     parser.add_argument(
         "--method",
         choices=[
@@ -633,90 +1265,216 @@ def parse_arguments() -> argparse.Namespace:
             "instance_conditioned_heatmap",
         ],
         default="all",
-        help="Specific method to benchmark, or 'all' to compare all six models.",
     )
+
     parser.add_argument(
         "--config",
         default=None,
-        help="Custom YAML config path (overrides method default when running single model).",
+        help=(
+            "Custom config when benchmarking "
+            "one method."
+        ),
     )
+
     parser.add_argument(
         "--weights",
         default=None,
-        help="Custom .pt checkpoint path (overrides method default when running single model).",
+        help=(
+            "Custom checkpoint when benchmarking "
+            "one method."
+        ),
+    )
+
+    parser.add_argument(
+        "--output-csv",
+        default="outputs/benchmark_comparison.csv",
     )
 
     return parser.parse_args()
 
 
+# ============================================================
+# Main
+# ============================================================
+
 def main() -> None:
-    args = parse_arguments()
 
-    # Determine device
-    device = torch.device(resolve_device(args.device))
-    device_info = get_device_info(device)
-    half = args.precision in ["fp16", "half"]
+    args = parse_args()
 
-    # Print benchmark environment and configuration
+    # --------------------------------------------------------
+    # Strict batch-size validation
+    # --------------------------------------------------------
+
+    if args.batch_size != 1:
+
+        raise ValueError(
+            "This benchmark is designed for "
+            "single-image robotic inference. "
+            "--batch-size must be 1."
+        )
+
+    # --------------------------------------------------------
+    # Device
+    # --------------------------------------------------------
+
+    resolved_device = resolve_device(
+        args.device
+    )
+
+    device = torch.device(
+        resolved_device
+    )
+
+    half = args.precision == "fp16"
+
+    if half and device.type != "cuda":
+
+        raise ValueError(
+            "FP16 benchmarking is intended for CUDA. "
+            "Use --precision fp32 on CPU."
+        )
+
+    # --------------------------------------------------------
+    # Print configuration
+    # --------------------------------------------------------
+
     print("=" * 80)
-    print("ROOT-POINT LOCALIZATION MODELS COMPARATIVE BENCHMARK")
-    print("=" * 80)
-    print(f"Device               : {device} [{device_info}]")
-    print(f"Input Resolution     : {args.img_size} x {args.img_size}")
-    print(f"Batch Size           : {args.batch_size}")
-    print(f"Warmup Iterations    : {args.warmup}")
-    print(f"Confidence Threshold : {args.conf}")
-    print(f"NMS IoU Threshold    : {args.iou}")
-    print(f"Precision Mode       : {args.precision.upper()}")
-    print(f"Include Mask Decode  : {args.include_masks}")
-    print(f"Test Set Directory   : {args.test_set}")
-    print(f"Output CSV Path      : {args.output_csv}")
+    print(
+        "YOLO-SEG-ROOT COMPARATIVE BENCHMARK"
+    )
     print("=" * 80)
 
-    # Preload test set into memory to strictly exclude disk I/O from timing
-    test_images = load_test_images(args.test_set, max_images=args.max_images)
+    print(
+        f"Device              : {device}"
+    )
 
-    # Filter model definitions based on CLI args
-    selected_models = MODEL_DEFINITIONS
-    if args.method != "all":
-        selected_models = [m for m in MODEL_DEFINITIONS if m["method_key"] == args.method]
-        if args.config:
-            selected_models[0]["config_file"] = args.config
-        if args.weights:
-            selected_models[0]["checkpoint_file"] = args.weights
-    elif args.config or args.weights:
-        if args.config:
-            selected_models[0]["config_file"] = args.config
-        if args.weights:
-            selected_models[0]["checkpoint_file"] = args.weights
+    print(
+        f"Hardware            : {get_device_info(device)}"
+    )
 
-    benchmark_results: List[ModelBenchmarkResult] = []
+    print(
+        f"Input               : "
+        f"{args.img_size} x {args.img_size}"
+    )
+
+    print(
+        "Batch size          : 1"
+    )
+
+    print(
+        f"Precision           : "
+        f"{args.precision.upper()}"
+    )
+
+    print(
+        f"Warm-up             : "
+        f"{args.warmup}"
+    )
+
+    print(
+        f"Confidence          : "
+        f"{args.conf}"
+    )
+
+    print(
+        f"NMS IoU             : "
+        f"{args.iou}"
+    )
+
+    print(
+        f"Test set            : "
+        f"{args.test_set}"
+    )
+
+    print("=" * 80)
+
+    # --------------------------------------------------------
+    # Load test images before timing
+    # --------------------------------------------------------
+
+    images = load_test_images(
+        test_dir=args.test_set,
+        max_images=args.max_images,
+    )
+
+    # --------------------------------------------------------
+    # Select models
+    # --------------------------------------------------------
+
+    if args.method == "all":
+
+        if args.config is not None:
+            raise ValueError(
+                "--config can only be used when "
+                "benchmarking one method."
+            )
+
+        if args.weights is not None:
+            raise ValueError(
+                "--weights can only be used when "
+                "benchmarking one method."
+            )
+
+        selected_models = [
+            dict(model)
+            for model in MODEL_DEFINITIONS
+        ]
+
+    else:
+
+        selected_models = [
+            dict(model)
+            for model in MODEL_DEFINITIONS
+            if model["method_key"] == args.method
+        ]
+
+        if not selected_models:
+
+            raise ValueError(
+                f"Unknown method: {args.method}"
+            )
+
+        if args.config is not None:
+            selected_models[0][
+                "config_file"
+            ] = args.config
+
+        if args.weights is not None:
+            selected_models[0][
+                "checkpoint_file"
+            ] = args.weights
+
+    # --------------------------------------------------------
+    # Run benchmark
+    # --------------------------------------------------------
+
+    results: List[ModelBenchmarkResult] = []
 
     for model_info in selected_models:
-        try:
-            res = benchmark_single_model(
-                model_info=model_info,
-                preloaded_images=test_images,
-                device=device,
-                img_size=args.img_size,
-                warmup_iters=args.warmup,
-                conf_thres=args.conf,
-                iou_thres=args.iou,
-                half=half,
-                include_masks=args.include_masks,
-            )
-            benchmark_results.append(res)
-        except Exception as e:
-            print(f"Error benchmarking {model_info['name']}: {e}")
-            import traceback
-            traceback.print_exc()
 
-    # Print summary table and save to CSV
-    if benchmark_results:
-        print_comparison_table(benchmark_results)
-        save_results_to_csv(benchmark_results, args.output_csv)
-    else:
-        print("No models were successfully benchmarked.")
+        result = benchmark_single_model(
+            model_info=model_info,
+            images=images,
+            device=device,
+            img_size=args.img_size,
+            warmup_iters=args.warmup,
+            conf_thres=args.conf,
+            iou_thres=args.iou,
+            half=half,
+        )
+
+        results.append(result)
+
+    # --------------------------------------------------------
+    # Results
+    # --------------------------------------------------------
+
+    print_results(results)
+
+    save_csv(
+        results,
+        args.output_csv,
+    )
 
 
 if __name__ == "__main__":
